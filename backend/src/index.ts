@@ -1,9 +1,10 @@
 import express from "express";
 import cors from "cors";
-import { config } from "./env.js";
-import { initSSE, sendDone, sendError } from "./sse.js";
-import { runRootAgent } from "./agents/root.js";
-import { resolveApproval } from "./approval.js";
+import { config } from "./env";
+import { initSSE, sendDone, sendError } from "./sse";
+import { runRootAgent } from "./agents/root";
+import { resolveApproval } from "./approval";
+import { Request, Response } from "express";
 
 const app = express();
 app.use(cors({ origin: "*" }));

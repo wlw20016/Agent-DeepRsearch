@@ -1,6 +1,6 @@
 import axios from "axios";
-import { config } from "../env.js";
-import { TavilyResult } from "../types.js";
+import { config } from "../env";
+import { TavilyResult } from "../types";
 
 const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 

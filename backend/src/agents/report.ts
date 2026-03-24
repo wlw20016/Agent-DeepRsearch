@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
-import { SSEClient, streamText } from "../sse.js";
-import { TavilyResult } from "../types.js";
-import { chatOnce } from "../llm.js";
+import { SSEClient, streamText } from "../sse";
+import { TavilyResult } from "../types";
+import { chatOnce } from "../llm";
 
 export type ReportResult = {
   markdown: string;

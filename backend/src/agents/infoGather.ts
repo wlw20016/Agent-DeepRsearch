@@ -1,8 +1,8 @@
 import { v4 as uuid } from "uuid";
-import { chatOnce } from "../llm.js";
-import { tavilySearch } from "../tools/tavily.js";
-import { Message, TavilyResult } from "../types.js";
-import { SSEClient, sendMessage, streamText } from "../sse.js";
+import { chatOnce } from "../llm";
+import { tavilySearch } from "../tools/tavily";
+import { Message, TavilyResult } from "../types";
+import { SSEClient, sendMessage, streamText } from "../sse";
 
 export type GatherResult = {
   results: TavilyResult[];

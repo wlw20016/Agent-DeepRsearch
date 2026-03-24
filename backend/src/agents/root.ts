@@ -1,11 +1,11 @@
 import { v4 as uuid } from "uuid";
-import { chatOnce } from "../llm.js";
-import { Message, TavilyResult } from "../types.js";
-import { SSEClient, sendMessage, streamText } from "../sse.js";
-import { runInformationGathering } from "./infoGather.js";
-import { runInformationProcessing } from "./infoProcess.js";
-import { runReportGeneration } from "./report.js";
-import { createApproval } from "../approval.js";
+import { chatOnce } from "../llm";
+import { Message, TavilyResult } from "../types";
+import { SSEClient, sendMessage, streamText } from "../sse";
+import { runInformationGathering } from "./infoGather";
+import { runInformationProcessing } from "./infoProcess";
+import { runReportGeneration } from "./report";
+import { createApproval } from "../approval";
 
 type PlanStep = {
   title: string;
