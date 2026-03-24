@@ -7,6 +7,7 @@ import { SessionList } from "./components/SessionList";
 import type { ConnectionStatus, Message, Session } from "./types/messages";
 import { useAgentStream } from "./hooks/useAgentStream";
 import "./App.css";
+import { TimelineNav } from "../src/components/messages/TimelineNav";
 
 const { Header, Content, Sider } = Layout;
 
@@ -173,6 +174,7 @@ export default function App() {
   useEffect(() => {
     autoScrollRef.current = true;
     setAutoScrollEnabled(true);
+
     scrollToBottom("auto");
   }, [activeSession?.id, scrollToBottom]);
 
@@ -336,16 +338,27 @@ export default function App() {
             <div className="messages-container">
               <div className="messages" ref={messagesRef}>
                 {activeSession?.messages.map((m) => (
-                  <MessageRenderer
-                    key={m.id}
-                    message={m}
-                    onResend={(text) => {
-                      setTitleFromPrompt(text);
-                      handleResend(text);
-                    }}
-                    onRetry={handleRetry}
-                    onDecision={onDecision}
-                  />
+                  // <MessageRenderer
+                  //   key={m.id}
+                  //   message={m}
+                  //   onResend={(text) => {
+                  //     setTitleFromPrompt(text);
+                  //     handleResend(text);
+                  //   }}
+                  //   onRetry={handleRetry}
+                  //   onDecision={onDecision}
+                  // />
+                  <div key={m.id} id={`chat-msg-${m.id}`}>
+                    <MessageRenderer
+                      message={m}
+                      onResend={(text) => {
+                        setTitleFromPrompt(text);
+                        handleResend(text);
+                      }}
+                      onRetry={handleRetry}
+                      onDecision={onDecision}
+                    />
+                  </div>
                 ))}
               </div>
               {showScrollToBottom && (
@@ -380,6 +393,19 @@ export default function App() {
           </div>
         </Content>
       </Layout>
+      <Sider 
+        width={240} 
+        theme="light" 
+        style={{ 
+          borderLeft: "1px solid #e8e8e8", 
+          padding: "16px",
+          display: "flex",
+          flexDirection: "column",
+          height: "100vh" 
+        }}
+      >
+        <TimelineNav messages={activeSession?.messages ?? []} />
+      </Sider>
     </Layout>
   );
 }
