@@ -5,6 +5,7 @@ import { Message } from "./types";
 export type SSEClient = {
   res: Response;
   closed: boolean;
+  abortController: AbortController;
 };
 
 export function initSSE(res: Response): SSEClient {
@@ -13,9 +14,13 @@ export function initSSE(res: Response): SSEClient {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.(); //作用 : 立即发送响应头到客户端
 
-  const client: SSEClient = { res, closed: false };
+  // 2. 实例化 AbortController
+  const abortController = new AbortController();
+
+  const client: SSEClient = { res, closed: false, abortController};
   res.on("close", () => {
     client.closed = true;
+    abortController.abort();
   });
 
   // 初始心跳
@@ -51,40 +56,20 @@ export async function streamText(
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
 }
-// // ✅ 新增：流式消息发送
-// export async function streamText(
-//   client: SSEClient,
-//   base: Omit<Message, "content">,
-//   fullTextOrMessages?: string | any[]
-// ) {
-//   const chunks: string[] = [];
-  
-//   // ✅ 直接调用流式生成器
-//   if (typeof fullTextOrMessages === 'string') {
-//     // 旧版本：直接发送文本
-//     const fullText = fullTextOrMessages;
-//     for (let i = 0; i < fullText.length; i += 60) {
-//       const piece = fullText.slice(i, i + 60);
-//       sendMessage(client, { 
-//         ...base, 
-//         type: "text", 
-//         content: piece,
-//         streaming: true 
-//       } as any);
-//     }
-//   } else {
-//     // 新版本：使用 chatStream 流式生成
-//     const messages = fullTextOrMessages || [{ role: "user", content: "" }];
-//     for await (const chunk of chatStream(messages)) {
-//       chunks.push(chunk);
-//       sendMessage(client, { 
-//         ...base, 
-//         type: "text", 
-//         content: chunk,
-//         streaming: true 
-//       } as any);
-//     }
-//   }
-  
-//   return chunks.join("");
-// }
+
+// 在 sse.ts 中新增此函数
+export async function streamTokens(
+  client: SSEClient,
+  base: Omit<Message, "content">,
+  tokenStream: AsyncGenerator<string, void, unknown>
+) {
+  // 遍历迭代器，拿到真实的 Token 切片
+  for await (const token of tokenStream) {
+    // 架构关键：如果用户强制刷新了浏览器导致连接断开，立即打断循环
+    // 配合后端大模型调用的 abort 机制，可以立刻切断与 DeepSeek 的连接，节省 API 费用
+    if (client.closed) break;
+    
+    // 直接将这一个 Token 通过 SSE 推给前端
+    sendMessage(client, { ...base, type: "text", content: token, streaming: true } as any);
+  }
+}
