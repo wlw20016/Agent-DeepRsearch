@@ -173,9 +173,14 @@ export default function App() {
 
   useEffect(() => {
     autoScrollRef.current = true;
-    setAutoScrollEnabled(true);
+    // 使用 requestAnimationFrame 延迟 setState 调用，避免同步调用导致的级联渲染
+    requestAnimationFrame(() => {
+      setAutoScrollEnabled(true);
+    });
 
-    scrollToBottom("auto");
+    requestAnimationFrame(() => {
+      scrollToBottom("auto");
+    });
   }, [activeSession?.id, scrollToBottom]);
 
   useEffect(() => {
@@ -184,7 +189,10 @@ export default function App() {
 
   useLayoutEffect(() => {
     if (!autoScrollEnabled) return;
-    scrollToBottom("auto");
+    // 使用 requestAnimationFrame 延迟执行，避免在 effect 中同步调用 setState
+    requestAnimationFrame(() => {
+      scrollToBottom("auto");
+    });
   }, [activeSession?.messages, autoScrollEnabled, scrollToBottom, stream.status]);
 
   useEffect(() => {
