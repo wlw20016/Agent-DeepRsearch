@@ -2,7 +2,7 @@ import { v4 as uuid } from "uuid";
 import { chatOnce } from "../llm";
 import { tavilySearch } from "../tools/tavily";
 import { Message, TavilyResult } from "../types";
-import { SSEClient, sendMessage, streamText } from "../sse";
+import { SSEClient, sendMessage, streamText, streamTokens } from "../sse";
 
 export type GatherResult = {
   results: TavilyResult[];

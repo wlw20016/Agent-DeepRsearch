@@ -74,6 +74,7 @@ function loadSessions(): Session[] {
 }
 
 export default function App() {
+  // 存入loadSessions函数，只有首次渲染时被调用。如果传入的是loadSessions()，那么每次被渲染后，就会重新触发
   const [sessions, setSessions] = useState<Session[]>(loadSessions);
   const [activeId, setActiveId] = useState<string>(sessions[0]?.id ?? "");
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -81,19 +82,23 @@ export default function App() {
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [hasOverflow, setHasOverflow] = useState(false);
   const autoScrollRef = useRef(true);
+  //
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeId) ?? sessions[0],
     [sessions, activeId]
   );
 
+  //自动存储 逻辑：sessions会话内容变化，就执行保存一下
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
+  //自动滚动
   useEffect(() => {
     autoScrollRef.current = autoScrollEnabled;
   }, [autoScrollEnabled]);
 
+  //滚动到底部
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const el = messagesRef.current;
     if (!el) return;
@@ -101,6 +106,7 @@ export default function App() {
     setIsAtBottom(true);
   }, []);
 
+  //更新滚动指标
   const updateScrollMetrics = useCallback(() => {
     const el = messagesRef.current;
     if (!el) return false;
@@ -110,7 +116,7 @@ export default function App() {
     setHasOverflow(el.scrollHeight > el.clientHeight + 4);
     return atBottom;
   }, []);
-
+  //添加消息 流式消息合并 更新消息
   const appendMessage = (msg: Message) => {
     setSessions((prev) =>
       prev.map((s) => {
@@ -133,7 +139,7 @@ export default function App() {
       })
     );
   };
-
+  //发送消息
   const updateUserMessage = (text: string) => {
     const userMsg: Message = { id: uuid(), type: "text", role: "user", content: text };
     autoScrollRef.current = true;
@@ -146,7 +152,7 @@ export default function App() {
     );
     stream.start(text);
   };
-
+  //流式处理 stream : { status, start: openStream, close: closeStream, pause }
   const stream = useAgentStream({
     sessionId: activeSession?.id ?? "default",
     onMessage: appendMessage,
@@ -170,7 +176,7 @@ export default function App() {
   });
 
   const isStreaming = stream.status === "streaming";
-
+  //自动滚动
   useEffect(() => {
     autoScrollRef.current = true;
     // 使用 requestAnimationFrame 延迟 setState 调用，避免同步调用导致的级联渲染
@@ -194,7 +200,7 @@ export default function App() {
       scrollToBottom("auto");
     });
   }, [activeSession?.messages, autoScrollEnabled, scrollToBottom, stream.status]);
-
+  //处理滚动事件
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
@@ -207,6 +213,7 @@ export default function App() {
     return () => el.removeEventListener("scroll", handleScroll);
   }, [updateScrollMetrics]);
 
+  //DOM变化监听
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
@@ -231,6 +238,7 @@ export default function App() {
     };
   }, [scrollToBottom, updateScrollMetrics]);
 
+  //审批决策
   const onDecision = async (actionId: string, decision: "approve" | "reject") => {
     const res = await fetch(
       `${(import.meta.env.VITE_API_BASE ?? "http://localhost:3001").replace(/\/$/, "")}/api/hil`,
@@ -247,7 +255,7 @@ export default function App() {
   const handleRetry = (message: Message) => {
     if (message.type === "text") updateUserMessage(message.content);
   };
-
+  //创建会话
   const createSession = () => {
     const s: Session = {
       id: uuid(),
@@ -264,7 +272,7 @@ export default function App() {
       prev.map((s) => (s.id === activeSession?.id ? { ...s, title: prompt.slice(0, 24) } : s))
     );
   };
-
+  //渲染状态标签
   const renderStatusTag = () => {
     switch (stream.status) {
       case "streaming":
@@ -308,6 +316,7 @@ export default function App() {
 
   return (
     <Layout className="layout">
+      {/* 左侧 会话列表 */}
       <Sider width={260} theme="light" className="sider">
         <SessionList
           sessions={sessions}
@@ -319,15 +328,19 @@ export default function App() {
           }}
         />
       </Sider>
+
+      {/* 中间 */}
       <Layout>
+        {/* 头部 */}
         <Header className="header">
+          {/* 标题 */}
           <div>
             <Typography.Title level={4} style={{ margin: 0 }} className="brand-title" >
               {LABEL_HEADER}
               {renderStatusTag()}
-            </Typography.Title>
-            
+            </Typography.Title>           
           </div>
+          {/* 状态指示器 */}
           <Badge
             status={
               stream.status === "streaming"
@@ -341,21 +354,17 @@ export default function App() {
             text={badgeTextMap[stream.status]}
           />
         </Header>
+        {/* 内容 */}
         <Content className="content">
           <div className="content-inner">
+            {/* 消息容器 */}
             <div className="messages-container">
+
+              {/* 消息列表 
+                  拿到当前会话以后，就开始渲染会话中的内容
+              */}
               <div className="messages" ref={messagesRef}>
                 {activeSession?.messages.map((m) => (
-                  // <MessageRenderer
-                  //   key={m.id}
-                  //   message={m}
-                  //   onResend={(text) => {
-                  //     setTitleFromPrompt(text);
-                  //     handleResend(text);
-                  //   }}
-                  //   onRetry={handleRetry}
-                  //   onDecision={onDecision}
-                  // />
                   <div key={m.id} id={`chat-msg-${m.id}`}>
                     <MessageRenderer
                       message={m}
@@ -369,6 +378,8 @@ export default function App() {
                   </div>
                 ))}
               </div>
+
+              {/* 回到底部按钮 */}
               {showScrollToBottom && (
                 <button
                   type="button"
@@ -383,8 +394,11 @@ export default function App() {
                 </button>
               )}
             </div>
+
+            {/* 输入栏 */}
             <div className="input-bar">
               <Space orientation="vertical" style={{ width: "100%" }}>
+                {/* 输入框 */}
                 <ChatInput
                   onSend={(text) => {
                     setTitleFromPrompt(text);
@@ -393,6 +407,7 @@ export default function App() {
                   isStreaming={stream.status === "streaming"}
                   onPause={stream.pause}
                 />
+                {/* 底部提示 */}
                 <Typography.Text type="secondary">
                   {FOOTER_HINT}
                 </Typography.Text>
@@ -401,6 +416,9 @@ export default function App() {
           </div>
         </Content>
       </Layout>
+
+
+      {/* 右侧 */}
       <Sider 
         width={240} 
         theme="light" 

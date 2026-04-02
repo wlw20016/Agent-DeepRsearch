@@ -77,6 +77,7 @@ export const MessageRenderer: React.FC<Props> = ({ message, onResend, onRetry, o
       className="message-card"
       size="small"
       bodyStyle={{ padding: 12 }}
+      // actions用来设置卡片底部的按钮操作，undefined就表示没有操作按钮
       actions={cardActions}
       bordered={false}
     >

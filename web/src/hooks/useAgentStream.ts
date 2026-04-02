@@ -133,6 +133,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
         body: JSON.stringify({ prompt, sessionId }),
         signal: ctrl.signal,
         
+        //SSE链接建立后，立即执行。每次连接只执行一次
         async onopen(response) {
           if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
             return; // 握手成功
@@ -140,6 +141,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
           throw new Error(`连接流失败, 状态码: ${response.status}`);
         },
         
+        //每次收到消息时执行
         onmessage(event) {
           if (event.event === "done") {
             setStatus("idle");

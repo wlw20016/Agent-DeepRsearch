@@ -55,6 +55,8 @@ export async function streamText(
     sendMessage(client, { ...base, type: "text", content: piece, streaming: true } as any);
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
+  // // 【新增】：发送一个流式结束的封口信号
+  // sendMessage(client, { ...base, type: "text", content: "", streaming: false } as any);
 }
 
 // 在 sse.ts 中新增此函数

@@ -38,7 +38,8 @@ const fallbackRespond = async (messages: ChatMessage[]) => {
 //   }
 //   return String(response.content);
 // }
-// 1. 接收 signal 参数
+// chatOnce函数是直接接收大模型返回的回答的
+// 1. 接收 signal 参数 
 export async function chatOnce(
   messages: ChatMessage[], 
   signal?: AbortSignal
