@@ -6,30 +6,31 @@ import { MessageRenderer } from "./components/MessageRenderer";
 import { SessionList } from "./components/SessionList";
 import type { ConnectionStatus, Message, Session } from "./types/messages";
 import { useAgentStream } from "./hooks/useAgentStream";
+import { TimelineNav } from "./components/messages/TimelineNav";
 import "./App.css";
-import { TimelineNav } from "../src/components/messages/TimelineNav";
 
 const { Header, Content, Sider } = Layout;
 
 const STORAGE_KEY = "research-assistant-sessions";
-const LABEL_NEW_SESSION = "\u65b0\u4f1a\u8bdd";
-const LABEL_GENERATING = "\u751f\u6210\u4e2d";
-const LABEL_RECONNECTING = "\u91cd\u8fde\u4e2d";
-const LABEL_ERROR = "\u8fde\u63a5\u5f02\u5e38";
-const LABEL_IDLE = "\u7a7a\u95f2";
-const LABEL_PAUSED = "\u5df2\u6682\u505c";
+const LABEL_NEW_SESSION = "新会话";
+const LABEL_GENERATING = "生成中";
+const LABEL_RECONNECTING = "重连中";
+const LABEL_ERROR = "连接异常";
+const LABEL_IDLE = "空闲";
+const LABEL_PAUSED = "已暂停";
 const LABEL_HEADER = "AI深度研究助手";
-const FOOTER_HINT =
-  "\u652f\u6301 Markdown\uff0c\u65ad\u7ebf\u81ea\u52a8\u91cd\u8fde\uff0c\u5de5\u5177\u8c03\u7528\u53ef\u6298\u53e0\u67e5\u770b\u3002";
+const FOOTER_HINT = "支持 Markdown，断线自动重连，工具调用可折叠查看。";
 const SCROLL_BOTTOM_THRESHOLD = 16;
 const SCROLL_THROTTLE_MS = 80;
 
 function throttle<T extends (...args: unknown[]) => void>(fn: T, wait: number): T {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let last = 0;
+
   return function throttled(this: unknown, ...args: Parameters<T>) {
     const now = Date.now();
     const remaining = wait - (now - last);
+
     if (remaining <= 0) {
       if (timer) {
         clearTimeout(timer);
@@ -37,7 +38,10 @@ function throttle<T extends (...args: unknown[]) => void>(fn: T, wait: number): 
       }
       last = now;
       fn.apply(this, args);
-    } else if (!timer) {
+      return;
+    }
+
+    if (!timer) {
       timer = setTimeout(() => {
         last = Date.now();
         timer = null;
@@ -52,17 +56,17 @@ function loadSessions(): Session[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed: Session[] = JSON.parse(raw);
-      // 读取历史消息时，确保不再使用流式打字效果
-      return parsed.map((s) => ({
-        ...s,
-        messages: s.messages.map((m) =>
-          m.type === "text" ? { ...m, streaming: false } : m
+      return parsed.map((session) => ({
+        ...session,
+        messages: session.messages.map((message) =>
+          message.type === "text" ? { ...message, streaming: false } : message
         ),
       }));
     }
   } catch {
-    /* ignore */
+    /* ignore invalid localStorage */
   }
+
   return [
     {
       id: uuid(),
@@ -74,119 +78,128 @@ function loadSessions(): Session[] {
 }
 
 export default function App() {
-  // 存入loadSessions函数，只有首次渲染时被调用。如果传入的是loadSessions()，那么每次被渲染后，就会重新触发
   const [sessions, setSessions] = useState<Session[]>(loadSessions);
   const [activeId, setActiveId] = useState<string>(sessions[0]?.id ?? "");
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [hasOverflow, setHasOverflow] = useState(false);
-  const autoScrollRef = useRef(true);
-  //
+
   const activeSession = useMemo(
-    () => sessions.find((s) => s.id === activeId) ?? sessions[0],
+    () => sessions.find((session) => session.id === activeId) ?? sessions[0],
     [sessions, activeId]
   );
 
-  //自动存储 逻辑：sessions会话内容变化，就执行保存一下
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
-  //自动滚动
   useEffect(() => {
     autoScrollRef.current = autoScrollEnabled;
   }, [autoScrollEnabled]);
 
-  //滚动到底部
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    const el = messagesRef.current;
-    if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior });
+    const element = messagesRef.current;
+    if (!element) return;
+
+    element.scrollTo({ top: element.scrollHeight, behavior });
     setIsAtBottom(true);
   }, []);
 
-  //更新滚动指标
   const updateScrollMetrics = useCallback(() => {
-    const el = messagesRef.current;
-    if (!el) return false;
-    const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+    const element = messagesRef.current;
+    if (!element) return false;
+
+    const distanceToBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
     const atBottom = distanceToBottom <= SCROLL_BOTTOM_THRESHOLD;
     setIsAtBottom(atBottom);
-    setHasOverflow(el.scrollHeight > el.clientHeight + 4);
+    setHasOverflow(element.scrollHeight > element.clientHeight + 4);
     return atBottom;
   }, []);
-  //添加消息 流式消息合并 更新消息
-  const appendMessage = (msg: Message) => {
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== activeSession?.id) return s;
-        const existingIdx = s.messages.findIndex((m) => m.id === msg.id);
-        let newMessages = s.messages.slice();
-        if (existingIdx >= 0 && msg.type === "text" && msg.streaming) {
-          const existing = newMessages[existingIdx] as Extract<Message, { type: "text" }>;
-          newMessages[existingIdx] = {
-            ...existing,
-            content: existing.content + msg.content,
-            streaming: msg.streaming,
-          };
-        } else if (existingIdx >= 0) {
-          newMessages[existingIdx] = msg;
-        } else {
-          newMessages = [...newMessages, msg];
-        }
-        return { ...s, messages: newMessages };
-      })
-    );
-  };
-  //发送消息
-  const updateUserMessage = (text: string) => {
-    const userMsg: Message = { id: uuid(), type: "text", role: "user", content: text };
-    autoScrollRef.current = true;
-    setAutoScrollEnabled(true);
-    scrollToBottom("auto");
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === activeSession?.id ? { ...s, messages: [...s.messages, userMsg] } : s
-      )
-    );
-    stream.start(text);
-  };
-  //流式处理 stream : { status, start: openStream, close: closeStream, pause }
+
+  const appendMessage = useCallback(
+    (incoming: Message) => {
+      setSessions((prev) =>
+        prev.map((session) => {
+          if (session.id !== activeSession?.id) return session;
+
+          const existingIndex = session.messages.findIndex((message) => message.id === incoming.id);
+          if (existingIndex < 0) {
+            return { ...session, messages: [...session.messages, incoming] };
+          }
+
+          const nextMessages = session.messages.slice();
+          const existing = nextMessages[existingIndex];
+
+          if (existing.type === "text" && incoming.type === "text") {
+            nextMessages[existingIndex] = incoming.streaming
+              ? {
+                  ...existing,
+                  content: existing.content + incoming.content,
+                  streaming: true,
+                }
+              : {
+                  ...existing,
+                  ...incoming,
+                  content: incoming.content || existing.content,
+                  streaming: false,
+                };
+          } else {
+            nextMessages[existingIndex] = incoming;
+          }
+
+          return { ...session, messages: nextMessages };
+        })
+      );
+    },
+    [activeSession?.id]
+  );
+
   const stream = useAgentStream({
     sessionId: activeSession?.id ?? "default",
     onMessage: appendMessage,
     onDone: () => {
-      // 将最后的流式消息标记为已完成，避免历史记录再次打字机渲染
       setSessions((prev) =>
-        prev.map((s) => {
-          if (s.id !== activeSession?.id) return s;
-          if (!s.messages.length) return s;
-          const lastIdx = s.messages.length - 1;
-          const last = s.messages[lastIdx];
-          if (last.type === "text" && last.streaming) {
-            const updated = s.messages.slice();
-            updated[lastIdx] = { ...last, streaming: false };
-            return { ...s, messages: updated };
-          }
-          return s;
+        prev.map((session) => {
+          if (session.id !== activeSession?.id) return session;
+
+          return {
+            ...session,
+            messages: session.messages.map((message) =>
+              message.type === "text" && message.streaming
+                ? { ...message, streaming: false }
+                : message
+            ),
+          };
         })
       );
     },
   });
 
+  const updateUserMessage = (text: string) => {
+    const userMessage: Message = { id: uuid(), type: "text", role: "user", content: text };
+    autoScrollRef.current = true;
+    setAutoScrollEnabled(true);
+    scrollToBottom("auto");
+
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === activeSession?.id
+          ? { ...session, messages: [...session.messages, userMessage] }
+          : session
+      )
+    );
+
+    stream.start(text);
+  };
+
   const isStreaming = stream.status === "streaming";
-  //自动滚动
+
   useEffect(() => {
     autoScrollRef.current = true;
-    // 使用 requestAnimationFrame 延迟 setState 调用，避免同步调用导致的级联渲染
-    requestAnimationFrame(() => {
-      setAutoScrollEnabled(true);
-    });
-
-    requestAnimationFrame(() => {
-      scrollToBottom("auto");
-    });
+    requestAnimationFrame(() => setAutoScrollEnabled(true));
+    requestAnimationFrame(() => scrollToBottom("auto"));
   }, [activeSession?.id, scrollToBottom]);
 
   useEffect(() => {
@@ -195,28 +208,27 @@ export default function App() {
 
   useLayoutEffect(() => {
     if (!autoScrollEnabled) return;
-    // 使用 requestAnimationFrame 延迟执行，避免在 effect 中同步调用 setState
-    requestAnimationFrame(() => {
-      scrollToBottom("auto");
-    });
+    requestAnimationFrame(() => scrollToBottom("auto"));
   }, [activeSession?.messages, autoScrollEnabled, scrollToBottom, stream.status]);
-  //处理滚动事件
+
   useEffect(() => {
-    const el = messagesRef.current;
-    if (!el) return;
+    const element = messagesRef.current;
+    if (!element) return;
+
     const handleScroll = throttle(() => {
       const atBottom = updateScrollMetrics();
       autoScrollRef.current = atBottom;
       setAutoScrollEnabled(atBottom);
     }, SCROLL_THROTTLE_MS);
-    el.addEventListener("scroll", handleScroll);
-    return () => el.removeEventListener("scroll", handleScroll);
+
+    element.addEventListener("scroll", handleScroll);
+    return () => element.removeEventListener("scroll", handleScroll);
   }, [updateScrollMetrics]);
 
-  //DOM变化监听
   useEffect(() => {
-    const el = messagesRef.current;
-    if (!el) return;
+    const element = messagesRef.current;
+    if (!element) return;
+
     const mutationObserver = new MutationObserver(() => {
       const shouldStick = autoScrollRef.current;
       updateScrollMetrics();
@@ -224,23 +236,26 @@ export default function App() {
         scrollToBottom("auto");
       }
     });
-    mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
+
+    mutationObserver.observe(element, { childList: true, subtree: true, characterData: true });
+
     const resizeObserver = new ResizeObserver(() => {
       updateScrollMetrics();
       if (autoScrollRef.current) {
         scrollToBottom("auto");
       }
     });
-    resizeObserver.observe(el);
+
+    resizeObserver.observe(element);
+
     return () => {
       mutationObserver.disconnect();
       resizeObserver.disconnect();
     };
   }, [scrollToBottom, updateScrollMetrics]);
 
-  //审批决策
   const onDecision = async (actionId: string, decision: "approve" | "reject") => {
-    const res = await fetch(
+    const response = await fetch(
       `${(import.meta.env.VITE_API_BASE ?? "http://localhost:3001").replace(/\/$/, "")}/api/hil`,
       {
         method: "POST",
@@ -248,57 +263,51 @@ export default function App() {
         body: JSON.stringify({ actionId, decision }),
       }
     );
-    if (!res.ok) antdMessage.error("\u53d1\u9001\u5ba1\u6279\u5931\u8d25");
+
+    if (!response.ok) {
+      antdMessage.error("发送审批失败");
+    }
   };
 
   const handleResend = (text: string) => updateUserMessage(text);
   const handleRetry = (message: Message) => {
-    if (message.type === "text") updateUserMessage(message.content);
+    if (message.type === "text") {
+      updateUserMessage(message.content);
+    }
   };
-  //创建会话
+
   const createSession = () => {
-    const s: Session = {
+    const session: Session = {
       id: uuid(),
       title: LABEL_NEW_SESSION,
       createdAt: Date.now(),
       messages: [],
     };
-    setSessions((prev) => [s, ...prev]);
-    setActiveId(s.id);
+
+    setSessions((prev) => [session, ...prev]);
+    setActiveId(session.id);
   };
 
   const setTitleFromPrompt = (prompt: string) => {
     setSessions((prev) =>
-      prev.map((s) => (s.id === activeSession?.id ? { ...s, title: prompt.slice(0, 24) } : s))
+      prev.map((session) =>
+        session.id === activeSession?.id
+          ? { ...session, title: prompt.slice(0, 24) || LABEL_NEW_SESSION }
+          : session
+      )
     );
   };
-  //渲染状态标签
+
   const renderStatusTag = () => {
     switch (stream.status) {
       case "streaming":
-        return (
-          <Tag color="green" style={{ marginLeft: 8 }}>
-            {LABEL_GENERATING}
-          </Tag>
-        );
+        return <Tag color="green" style={{ marginLeft: 8 }}>{LABEL_GENERATING}</Tag>;
       case "reconnecting":
-        return (
-          <Tag color="orange" style={{ marginLeft: 8 }}>
-            {LABEL_RECONNECTING}
-          </Tag>
-        );
+        return <Tag color="orange" style={{ marginLeft: 8 }}>{LABEL_RECONNECTING}</Tag>;
       case "error":
-        return (
-          <Tag color="red" style={{ marginLeft: 8 }}>
-            {LABEL_ERROR}
-          </Tag>
-        );
+        return <Tag color="red" style={{ marginLeft: 8 }}>{LABEL_ERROR}</Tag>;
       case "paused":
-        return (
-          <Tag color="blue" style={{ marginLeft: 8 }}>
-            {LABEL_PAUSED}
-          </Tag>
-        );
+        return <Tag color="blue" style={{ marginLeft: 8 }}>{LABEL_PAUSED}</Tag>;
       default:
         return null;
     }
@@ -316,7 +325,6 @@ export default function App() {
 
   return (
     <Layout className="layout">
-      {/* 左侧 会话列表 */}
       <Sider width={260} theme="light" className="sider">
         <SessionList
           sessions={sessions}
@@ -329,18 +337,14 @@ export default function App() {
         />
       </Sider>
 
-      {/* 中间 */}
       <Layout>
-        {/* 头部 */}
         <Header className="header">
-          {/* 标题 */}
           <div>
-            <Typography.Title level={4} style={{ margin: 0 }} className="brand-title" >
+            <Typography.Title level={4} style={{ margin: 0 }} className="brand-title">
               {LABEL_HEADER}
               {renderStatusTag()}
-            </Typography.Title>           
+            </Typography.Title>
           </div>
-          {/* 状态指示器 */}
           <Badge
             status={
               stream.status === "streaming"
@@ -354,20 +358,15 @@ export default function App() {
             text={badgeTextMap[stream.status]}
           />
         </Header>
-        {/* 内容 */}
+
         <Content className="content">
           <div className="content-inner">
-            {/* 消息容器 */}
             <div className="messages-container">
-
-              {/* 消息列表 
-                  拿到当前会话以后，就开始渲染会话中的内容
-              */}
               <div className="messages" ref={messagesRef}>
-                {activeSession?.messages.map((m) => (
-                  <div key={m.id} id={`chat-msg-${m.id}`}>
+                {activeSession?.messages.map((message) => (
+                  <div key={message.id} id={`chat-msg-${message.id}`}>
                     <MessageRenderer
-                      message={m}
+                      message={message}
                       onResend={(text) => {
                         setTitleFromPrompt(text);
                         handleResend(text);
@@ -379,7 +378,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* 回到底部按钮 */}
               {showScrollToBottom && (
                 <button
                   type="button"
@@ -395,10 +393,8 @@ export default function App() {
               )}
             </div>
 
-            {/* 输入栏 */}
             <div className="input-bar">
               <Space orientation="vertical" style={{ width: "100%" }}>
-                {/* 输入框 */}
                 <ChatInput
                   onSend={(text) => {
                     setTitleFromPrompt(text);
@@ -407,27 +403,22 @@ export default function App() {
                   isStreaming={stream.status === "streaming"}
                   onPause={stream.pause}
                 />
-                {/* 底部提示 */}
-                <Typography.Text type="secondary">
-                  {FOOTER_HINT}
-                </Typography.Text>
+                <Typography.Text type="secondary">{FOOTER_HINT}</Typography.Text>
               </Space>
             </div>
           </div>
         </Content>
       </Layout>
 
-
-      {/* 右侧 */}
-      <Sider 
-        width={240} 
-        theme="light" 
-        style={{ 
-          borderLeft: "1px solid #e8e8e8", 
+      <Sider
+        width={240}
+        theme="light"
+        style={{
+          borderLeft: "1px solid #e8e8e8",
           padding: "16px",
           display: "flex",
           flexDirection: "column",
-          height: "100vh" 
+          height: "100vh",
         }}
       >
         <TimelineNav messages={activeSession?.messages ?? []} />

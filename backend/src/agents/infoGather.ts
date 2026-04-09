@@ -1,28 +1,38 @@
 import { v4 as uuid } from "uuid";
-import { chatOnce } from "../llm";
+import { chatStream } from "../llm";
 import { tavilySearch } from "../tools/tavily";
-import { Message, TavilyResult } from "../types";
-import { SSEClient, sendMessage, streamText, streamTokens } from "../sse";
+import { TavilyResult } from "../types";
+import { SSEClient, endTextStream, sendMessage, startTextStream, streamTokens } from "../sse";
 
 export type GatherResult = {
   results: TavilyResult[];
   summary: string;
 };
 
+async function* tapStream(
+  stream: AsyncGenerator<string, void, unknown>,
+  onToken: (token: string) => void
+) {
+  for await (const token of stream) {
+    onToken(token);
+    yield token;
+  }
+}
+
 export async function runInformationGathering(
   client: SSEClient,
   userQuery: string
 ): Promise<GatherResult> {
   const agentName = "信息收集 Agent";
+
   sendMessage(client, {
     id: uuid(),
     type: "subAgentCall",
     role: "agent",
     content: agentName,
-    meta: { task: `针对「${userQuery}」进行网络搜索`, agent: agentName },
+    meta: { task: `针对“${userQuery}”进行网络搜索`, agent: agentName },
   });
 
-  // ReAct: 思考 -> Action (web_search调用tavily api) -> 观察/总结
   sendMessage(client, {
     id: uuid(),
     type: "toolCall",
@@ -48,19 +58,27 @@ export async function runInformationGathering(
   const summaryPrompt = [
     {
       role: "system",
-      content:
-        "你是信息收集助理，请用最多30条要点总结搜索结果，并保留可引用的URL列表。",
+      content: "你是信息收集助理，请用最多 10 条要点总结搜索结果，并保留可引用的 URL 列表。",
     },
-    { role: "human", content: `用户问题：${userQuery}\n搜索结果：\n${combined}` },
+    {
+      role: "human",
+      content: `用户问题：${userQuery}\n搜索结果：\n${combined}`,
+    },
   ] as any;
 
-  const summary = await chatOnce(summaryPrompt);
+  const messageId = uuid();
+  const baseMessage = { id: messageId, role: "agent" as const };
+  let summary = "";
 
-  await streamText(
+  startTextStream(client, baseMessage, "收集完成，关键信息如下：\n");
+  await streamTokens(
     client,
-    { id: uuid(), role: "agent" } as Message,
-    `收集完成，关键发现：\n${summary}`
+    baseMessage,
+    tapStream(chatStream(summaryPrompt, client.abortController.signal), (token) => {
+      summary += token;
+    })
   );
+  endTextStream(client, baseMessage);
 
   return { results, summary };
 }

@@ -13,4 +13,16 @@ export default defineConfig({
       },
     },
   },
+  build: {
+  rollupOptions: {
+    output: {
+      manualChunks: (id) => {
+        // 将所有来自 node_modules 的依赖打包到 vendor.js
+        if (id.includes('node_modules')) {
+          return 'vendor';
+        }
+      }
+    }
+  }
+}
 });

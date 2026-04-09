@@ -1,11 +1,21 @@
 import { v4 as uuid } from "uuid";
-import { SSEClient, streamText } from "../sse";
+import { SSEClient, endTextStream, startTextStream, streamTokens } from "../sse";
 import { TavilyResult } from "../types";
-import { chatOnce } from "../llm";
+import { chatStream } from "../llm";
 
 export type ProcessingResult = {
   insights: string;
 };
+
+async function* tapStream(
+  stream: AsyncGenerator<string, void, unknown>,
+  onToken: (token: string) => void
+) {
+  for await (const token of stream) {
+    onToken(token);
+    yield token;
+  }
+}
 
 export async function runInformationProcessing(
   client: SSEClient,
@@ -16,23 +26,33 @@ export async function runInformationProcessing(
     .map((r, idx) => `${idx + 1}. ${r.title}\n${r.content}\n来源: ${r.url}`)
     .join("\n\n");
 
-  const response = await chatOnce([
-    {
-      role: "system",
-      content:
-        "你是信息处理专家，请合并去重搜索结果，提炼关键洞见，强调可行结论和数据点。",
-    } as any,
-    {
-      role: "human",
-      content: `用户问题：${prompt}\n原始资料：\n${formatted}`,
-    } as any,
-  ]);
+  const messageId = uuid();
+  const baseMessage = { id: messageId, role: "agent" as const };
+  let insights = "";
 
-  await streamText(
-    client,
-    { id: uuid(), role: "agent" } as any,
-    `处理完成，洞见摘要：\n${response}`
+  const responseStream = chatStream(
+    [
+      {
+        role: "system",
+        content: "你是信息处理专家，请合并去重搜索结果，提炼关键洞察，强调可行结论和数据点。",
+      } as any,
+      {
+        role: "human",
+        content: `用户问题：${prompt}\n原始资料：\n${formatted}`,
+      } as any,
+    ],
+    client.abortController.signal
   );
 
-  return { insights: response };
+  startTextStream(client, baseMessage, "处理完成，洞察摘要如下：\n");
+  await streamTokens(
+    client,
+    baseMessage,
+    tapStream(responseStream, (token) => {
+      insights += token;
+    })
+  );
+  endTextStream(client, baseMessage);
+
+  return { insights };
 }
