@@ -21,6 +21,16 @@ export const TextMessage: React.FC<Props> = ({ message, actions }) => {
 
   // 2. 新增：捕获 Markdown 渲染后的真实 HTML DOM
   const contentRef = useRef<HTMLDivElement>(null);
+  const latestMessageRef = useRef(message);
+  const displayedLengthRef = useRef(displayedContent.length);
+
+  useEffect(() => {
+    latestMessageRef.current = message;
+  }, [message]);
+
+  useEffect(() => {
+    displayedLengthRef.current = displayedContent.length;
+  }, [displayedContent]);
 
   const roleColor =
     message.role === "user" ? "blue" : message.role === "system" ? "purple" : "green";
@@ -29,7 +39,8 @@ export const TextMessage: React.FC<Props> = ({ message, actions }) => {
   useEffect(() => {
     // 使用 requestAnimationFrame 或 setTimeout 延迟 setState 调用，避免同步调用导致的级联渲染
     const timeoutId = setTimeout(() => {
-      setDisplayedContent(message.streaming ? "" : message.content);
+      const latest = latestMessageRef.current;
+      setDisplayedContent(latest.streaming ? "" : latest.content);
     }, 0);
     return () => clearTimeout(timeoutId);
   }, [message.id]);
@@ -37,21 +48,22 @@ export const TextMessage: React.FC<Props> = ({ message, actions }) => {
   useEffect(() => {
     if (!message.streaming) {
       // 使用 requestAnimationFrame 延迟 setState 调用，避免同步调用导致的级联渲染
-      requestAnimationFrame(() => {
+      const rafId = requestAnimationFrame(() => {
         setDisplayedContent(message.content);
       });
-      return;
+      return () => cancelAnimationFrame(rafId);
     }
     const target = message.content;
-    let i = displayedContent.length;
+    let i = displayedLengthRef.current;
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const tick = () => {
       if (cancelled) return;
       i = Math.min(i + 2, target.length);
       setDisplayedContent(target.slice(0, i));
       if (i < target.length) {
-        setTimeout(tick, 14);
+        timeoutId = setTimeout(tick, 14);
       }
     };
 
@@ -59,6 +71,7 @@ export const TextMessage: React.FC<Props> = ({ message, actions }) => {
 
     return () => {
       cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [message.content, message.streaming]);
   // ------------------------------------
