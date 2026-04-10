@@ -40,7 +40,7 @@ export async function runInformationGathering(
     content: "web_search",
     meta: { tool: "web_search", input: userQuery },
   });
-
+  // results {title, url, content}
   const results = await tavilySearch(userQuery);
 
   sendMessage(client, {

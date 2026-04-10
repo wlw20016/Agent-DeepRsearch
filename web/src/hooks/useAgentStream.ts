@@ -82,7 +82,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import type { ConnectionStatus, Message } from "../types/messages";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 type Props = {
   sessionId: string;

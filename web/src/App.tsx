@@ -256,7 +256,7 @@ export default function App() {
 
   const onDecision = async (actionId: string, decision: "approve" | "reject") => {
     const response = await fetch(
-      `${(import.meta.env.VITE_API_BASE ?? "http://localhost:3001").replace(/\/$/, "")}/api/hil`,
+      `${(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "")}/api/hil`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

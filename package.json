@@ -1,0 +1,11 @@
+{
+  "name": "deepagent-main",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace web"
+  }
+}
