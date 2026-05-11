@@ -11,6 +11,14 @@ import { MessageListItem } from "./components/MessageListItem";
 import { SessionList } from "./components/SessionList";
 import { TimelineNav } from "./components/messages/TimelineNav";
 import { useAgentStream } from "./hooks/useAgentStream";
+import {
+  createRemoteSession,
+  fetchSessionMessages,
+  fetchSessions,
+  saveRemoteMessage,
+  updateRemoteSessionTitle,
+} from "./api/sessions";
+import { loadCachedSessions, saveCachedSessions } from "./storage/sessionCache";
 import type { ConnectionStatus, Message, Session } from "./types/messages";
 import "./App.css";
 
@@ -85,9 +93,49 @@ function loadSessions(): Session[] {
       id: uuid(),
       title: LABEL_NEW_SESSION,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       messages: [],
     },
   ];
+}
+
+function mergeSessions(localSessions: Session[], remoteSessions: Session[]): Session[] {
+  const localById = new Map(localSessions.map((session) => [session.id, session]));
+  const remoteById = new Map(remoteSessions.map((session) => [session.id, session]));
+  const ids = new Set([...remoteById.keys(), ...localById.keys()]);
+
+  return Array.from(ids)
+    .map((id) => {
+      const local = localById.get(id);
+      const remote = remoteById.get(id);
+      if (!local) return remote;
+      if (!remote) return local;
+
+      return {
+        ...remote,
+        messages: local.messages.length ? local.messages : remote.messages,
+      };
+    })
+    .filter((session): session is Session => Boolean(session))
+    .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
+}
+
+function updateMessageSyncStatus(
+  sessions: Session[],
+  sessionId: string,
+  messageId: string,
+  syncStatus: Message["syncStatus"]
+) {
+  return sessions.map((session) => {
+    if (session.id !== sessionId) return session;
+
+    return {
+      ...session,
+      messages: session.messages.map((message) =>
+        message.id === messageId ? { ...message, syncStatus } : message
+      ),
+    };
+  });
 }
 
 export default function App() {
@@ -102,6 +150,7 @@ export default function App() {
   const [knowledgePreviewLoading, setKnowledgePreviewLoading] = useState(false);
   const [knowledgePreviewItem, setKnowledgePreviewItem] = useState<KnowledgeDetail | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const sessionsRef = useRef<Session[]>(sessions);
   const autoScrollRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
@@ -115,12 +164,130 @@ export default function App() {
   );
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+    const timer = window.setTimeout(() => {
+      void saveCachedSessions(sessions).catch((error: unknown) => {
+        console.error("Failed to save IndexedDB session cache", error);
+      });
+    }, 300);
+
+    return () => window.clearTimeout(timer);
   }, [sessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadCachedSessions()
+      .then((cachedSessions) => {
+        if (cancelled || !cachedSessions.length) return;
+        setSessions((prev) => {
+          const merged = mergeSessions(prev, cachedSessions);
+          setActiveId((current) =>
+            merged.some((session) => session.id === current) ? current : merged[0].id
+          );
+          return merged;
+        });
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to load IndexedDB session cache", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchSessions()
+      .then((remoteSessions) => {
+        if (cancelled) return;
+
+        setSessions((prev) => {
+          const merged = mergeSessions(prev, remoteSessions);
+          if (!merged.length) return prev;
+          setActiveId((current) =>
+            merged.some((session) => session.id === current) ? current : merged[0].id
+          );
+          return merged;
+        });
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to sync sessions", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeSession?.id) return;
+    if (activeSession.messages.length > 0) return;
+
+    let cancelled = false;
+
+    fetchSessionMessages(activeSession.id)
+      .then((messages) => {
+        if (cancelled || !messages.length) return;
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === activeSession.id ? { ...session, messages } : session
+          )
+        );
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to sync session messages", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession?.id, activeSession?.messages.length]);
 
   useEffect(() => {
     autoScrollRef.current = autoScrollEnabled;
   }, [autoScrollEnabled]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    let retrying = false;
+
+    const retryFailedMessages = async () => {
+      if (retrying) return;
+      retrying = true;
+
+      try {
+        for (const session of sessionsRef.current) {
+          for (const item of session.messages) {
+            if (item.role !== "user" && item.role !== "system") continue;
+            if (item.syncStatus !== "failed") continue;
+
+            try {
+              await saveRemoteMessage(session.id, { ...item, syncStatus: "pending" });
+              setSessions((prev) => updateMessageSyncStatus(prev, session.id, item.id, "synced"));
+            } catch (error: unknown) {
+              console.error("Failed to retry message sync", error);
+            }
+          }
+        }
+      } finally {
+        retrying = false;
+      }
+    };
+
+    window.addEventListener("online", retryFailedMessages);
+    const timer = window.setInterval(retryFailedMessages, 15_000);
+    void retryFailedMessages();
+
+    return () => {
+      window.removeEventListener("online", retryFailedMessages);
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const element = messagesRef.current;
@@ -149,7 +316,7 @@ export default function App() {
 
           const existingIndex = session.messages.findIndex((message) => message.id === incoming.id);
           if (existingIndex < 0) {
-            return { ...session, messages: [...session.messages, incoming] };
+            return { ...session, updatedAt: Date.now(), messages: [...session.messages, incoming] };
           }
 
           const nextMessages = session.messages.slice();
@@ -163,7 +330,7 @@ export default function App() {
             nextMessages[existingIndex] = incoming;
           }
 
-          return { ...session, messages: nextMessages };
+          return { ...session, updatedAt: Date.now(), messages: nextMessages };
         })
       );
     },
@@ -196,32 +363,76 @@ export default function App() {
 
   const appendSystemMessage = useCallback(
     (content: string) => {
-      const systemMessage: Message = { id: uuid(), type: "text", role: "system", content };
+      const systemMessage: Message = {
+        id: uuid(),
+        type: "text",
+        role: "system",
+        content,
+        syncStatus: "pending",
+      };
+      const sessionId = activeSession?.id;
       setSessions((prev) =>
         prev.map((session) =>
-          session.id === activeSession?.id
-            ? { ...session, messages: [...session.messages, systemMessage] }
+          session.id === sessionId
+            ? { ...session, updatedAt: Date.now(), messages: [...session.messages, systemMessage] }
             : session
         )
       );
+
+      if (sessionId) {
+        void saveRemoteMessage(sessionId, systemMessage)
+          .then(() => {
+            setSessions((prev) =>
+              updateMessageSyncStatus(prev, sessionId, systemMessage.id, "synced")
+            );
+          })
+          .catch((error: unknown) => {
+            console.error("Failed to save system message", error);
+            setSessions((prev) =>
+              updateMessageSyncStatus(prev, sessionId, systemMessage.id, "failed")
+            );
+          });
+      }
     },
     [activeSession?.id]
   );
 
   const updateUserMessage = useCallback(
     (text: string) => {
-      const userMessage: Message = { id: uuid(), type: "text", role: "user", content: text };
+      const userMessage: Message = {
+        id: uuid(),
+        type: "text",
+        role: "user",
+        content: text,
+        syncStatus: "pending",
+      };
+      const sessionId = activeSession?.id;
       autoScrollRef.current = true;
       setAutoScrollEnabled(true);
       scrollToBottom("auto");
 
       setSessions((prev) =>
         prev.map((session) =>
-          session.id === activeSession?.id
-            ? { ...session, messages: [...session.messages, userMessage] }
+          session.id === sessionId
+            ? { ...session, updatedAt: Date.now(), messages: [...session.messages, userMessage] }
             : session
         )
       );
+
+      if (sessionId) {
+        void saveRemoteMessage(sessionId, userMessage)
+          .then(() => {
+            setSessions((prev) =>
+              updateMessageSyncStatus(prev, sessionId, userMessage.id, "synced")
+            );
+          })
+          .catch((error: unknown) => {
+            console.error("Failed to save user message", error);
+            setSessions((prev) =>
+              updateMessageSyncStatus(prev, sessionId, userMessage.id, "failed")
+            );
+          });
+      }
 
       startStream(text);
     },
@@ -474,25 +685,65 @@ export default function App() {
   }, [updateUserMessage]);
 
   const createSession = () => {
+    const now = Date.now();
     const session: Session = {
       id: uuid(),
       title: LABEL_NEW_SESSION,
-      createdAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
+      syncStatus: "pending",
       messages: [],
     };
 
     setSessions((prev) => [session, ...prev]);
     setActiveId(session.id);
+    void createRemoteSession(session)
+      .then((remoteSession) => {
+        setSessions((prev) =>
+          prev.map((item) =>
+            item.id === session.id ? { ...item, ...remoteSession, syncStatus: "synced" } : item
+          )
+        );
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to create remote session", error);
+        setSessions((prev) =>
+          prev.map((item) => (item.id === session.id ? { ...item, syncStatus: "failed" } : item))
+        );
+      });
   };
 
   const setTitleFromPrompt = useCallback((prompt: string) => {
+    const sessionId = activeSession?.id;
+    const title = prompt.slice(0, 24) || LABEL_NEW_SESSION;
     setSessions((prev) =>
       prev.map((session) =>
-        session.id === activeSession?.id
-          ? { ...session, title: prompt.slice(0, 24) || LABEL_NEW_SESSION }
+        session.id === sessionId
+          ? { ...session, title, updatedAt: Date.now(), syncStatus: "pending" }
           : session
       )
     );
+
+    if (sessionId) {
+      void updateRemoteSessionTitle(sessionId, title)
+        .then((remoteSession) => {
+          setSessions((prev) =>
+            prev.map((session) =>
+              session.id === sessionId
+                ? { ...session, ...remoteSession, syncStatus: "synced" }
+                : session
+            )
+          );
+        })
+        .catch((error: unknown) => {
+          console.error("Failed to update remote session title", error);
+          setSessions((prev) =>
+            prev.map((session) =>
+              session.id === sessionId ? { ...session, syncStatus: "failed" } : session
+            )
+          );
+        });
+    }
   }, [activeSession?.id]);
 
   const handleMessageResend = useCallback(
