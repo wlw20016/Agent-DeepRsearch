@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import path from "path";
 import { v4 as uuid } from "uuid";
 import { runRootAgent } from "./agents/root.js";
+import { appendSessionMessage } from "./sessions.js";
 import { SSEClient, SSEEventName, sendDone, sendError } from "./sse.js";
 import { Message } from "./types.js";
 
@@ -163,6 +164,10 @@ function appendRunEvent(run: ResearchRun, event: SSEEventName, data: Message | s
 
   insertEventStmt.run(run.id, item.seq, item.event, JSON.stringify(item.data), item.createdAt);
   updateNextSeqStmt.run(run.nextSeq, run.id);
+
+  if (event === "message" && typeof data !== "string") {
+    appendSessionMessage(run.sessionId, data);
+  }
 
   for (const subscriber of run.subscribers) {
     writeSSE(subscriber, item.event, item.data, item.seq);

@@ -21,6 +21,15 @@ import {
   getResearchRun,
   subscribeToRun,
 } from "./runs.js";
+import {
+  appendSessionMessages,
+  deleteSession,
+  ensureSession,
+  listSessionMessages,
+  listSessions,
+  updateSessionTitle,
+} from "./sessions.js";
+import type { Message } from "./types.js";
 
 export const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -30,6 +39,111 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ ok: true });
+});
+
+app.get("/api/sessions", (_req: Request, res: Response) => {
+  try {
+    res.json({ ok: true, sessions: listSessions() });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to list sessions";
+    res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.post("/api/sessions", (req: Request, res: Response) => {
+  try {
+    const session = ensureSession({
+      id: typeof req.body?.id === "string" ? req.body.id : undefined,
+      title: typeof req.body?.title === "string" ? req.body.title : undefined,
+      createdAt: typeof req.body?.createdAt === "number" ? req.body.createdAt : undefined,
+    });
+    res.json({ ok: true, session });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to create session";
+    res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.patch("/api/sessions/:sessionId", (req: Request, res: Response) => {
+  const sessionId = Array.isArray(req.params.sessionId)
+    ? req.params.sessionId[0]
+    : req.params.sessionId;
+  const title = typeof req.body?.title === "string" ? req.body.title : "";
+
+  if (!title) {
+    return res.status(400).json({ error: "missing title" });
+  }
+
+  try {
+    const session = updateSessionTitle(sessionId, title);
+    if (!session) {
+      return res.status(404).json({ error: "session not found" });
+    }
+
+    return res.json({ ok: true, session });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to update session";
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.delete("/api/sessions/:sessionId", (req: Request, res: Response) => {
+  const sessionId = Array.isArray(req.params.sessionId)
+    ? req.params.sessionId[0]
+    : req.params.sessionId;
+
+  try {
+    deleteSession(sessionId);
+    return res.json({ ok: true });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to delete session";
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.get("/api/sessions/:sessionId/messages", (req: Request, res: Response) => {
+  const sessionId = Array.isArray(req.params.sessionId)
+    ? req.params.sessionId[0]
+    : req.params.sessionId;
+  const before = Number(req.query.before ?? Number.MAX_SAFE_INTEGER);
+  const limit = Number(req.query.limit ?? 100);
+
+  try {
+    const messages = listSessionMessages(sessionId, {
+      before: Number.isFinite(before) ? before : undefined,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    return res.json({ ok: true, messages });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to list session messages";
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+app.post("/api/sessions/:sessionId/messages", (req: Request, res: Response) => {
+  const sessionId = Array.isArray(req.params.sessionId)
+    ? req.params.sessionId[0]
+    : req.params.sessionId;
+  const payload = req.body?.messages ?? req.body?.message;
+  const messages = (Array.isArray(payload) ? payload : [payload]).filter(Boolean) as Message[];
+
+  if (!messages.length) {
+    return res.status(400).json({ error: "missing messages" });
+  }
+
+  try {
+    const saved = appendSessionMessages(sessionId, messages);
+    return res.json({ ok: true, messages: saved });
+  } catch (error: unknown) {
+    console.error(error);
+    const errorMessage = error instanceof Error ? error.message : "failed to save session messages";
+    return res.status(500).json({ error: errorMessage });
+  }
 });
 
 app.get("/api/knowledge", async (_req: Request, res: Response) => {
