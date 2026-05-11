@@ -1,10 +1,13 @@
 import { Response } from "express";
 import { Message } from "./types";
 
+export type SSEEventName = "message" | "done" | "error";
+
 export type SSEClient = {
-  res: Response;
+  res?: Response;
   closed: boolean;
   abortController: AbortController;
+  emit?: (event: SSEEventName, data: Message | string) => void;
 };
 
 type TextStreamBase = Pick<Extract<Message, { type: "text" }>, "id" | "role">;
@@ -29,17 +32,29 @@ export function initSSE(res: Response): SSEClient {
 
 export function sendMessage(client: SSEClient, message: Message) {
   if (client.closed) return;
-  client.res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+  if (client.emit) {
+    client.emit("message", message);
+    return;
+  }
+  client.res?.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
 }
 
 export function sendDone(client: SSEClient) {
   if (client.closed) return;
-  client.res.write(`event: done\ndata: "complete"\n\n`);
+  if (client.emit) {
+    client.emit("done", "complete");
+    return;
+  }
+  client.res?.write(`event: done\ndata: "complete"\n\n`);
 }
 
 export function sendError(client: SSEClient, error: string) {
   if (client.closed) return;
-  client.res.write(`event: error\ndata: ${JSON.stringify(error)}\n\n`);
+  if (client.emit) {
+    client.emit("error", error);
+    return;
+  }
+  client.res?.write(`event: error\ndata: ${JSON.stringify(error)}\n\n`);
 }
 
 export function startTextStream(client: SSEClient, base: TextStreamBase, content = "") {

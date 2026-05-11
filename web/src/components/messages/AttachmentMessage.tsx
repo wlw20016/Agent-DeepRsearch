@@ -2,9 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Card, Button, Space, Typography, Modal } from "antd";
 import { DownloadOutlined, FileTextOutlined, LinkOutlined } from "@ant-design/icons";
 import type { Message } from "../../types/messages";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
+import { MarkdownRenderer } from "../MarkdownRenderer";
 
 type Props = {
   message: Extract<Message, { type: "attachment" }>;
@@ -82,11 +80,17 @@ export const AttachmentMessage: React.FC<Props> = ({ message }) => {
         bodyStyle={{ maxHeight: "70vh", overflow: "auto" }}
       >
         {decodedMarkdown ? (
-          <div className="markdown-body attachment-preview">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-              {decodedMarkdown}
-            </ReactMarkdown>
-          </div>
+          <MarkdownRenderer
+            content={decodedMarkdown}
+            className="markdown-body attachment-preview"
+            fallback={
+              <div className="markdown-body attachment-preview">
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap", font: "inherit" }}>
+                  {decodedMarkdown}
+                </pre>
+              </div>
+            }
+          />
         ) : (
           <iframe
             title="preview"

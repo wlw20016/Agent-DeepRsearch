@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 import { SSEClient, endTextStream, startTextStream, streamTokens } from "../sse.js";
-import { TavilyResult } from "../types.js";
+import { RetrievedSource } from "../types.js";
 import { chatStream } from "../llm.js";
 
 export type ReportResult = {
@@ -18,19 +18,26 @@ async function* tapStream(
   }
 }
 
+function buildSourceLabel(source: RetrievedSource, index: number) {
+  return source.sourceType === "kb" ? `KB-${index + 1}` : `WEB-${index + 1}`;
+}
+
 export async function runReportGeneration(
   client: SSEClient,
   prompt: string,
   insights: string,
-  sources: TavilyResult[]
+  sources: RetrievedSource[]
 ): Promise<ReportResult> {
   const sourcesText = sources
-    .map((source, index) => `[${index + 1}] ${source.title} (${source.url})\n${source.content}`)
+    .map((source, index) => {
+      const label = buildSourceLabel(source, index);
+      return `[${label}] ${source.title} (${source.url ?? "N/A"})\n${source.content}`;
+    })
     .join("\n\n");
 
   const messages = [
     new SystemMessage(
-      "你是报告生成 Agent，请使用 Markdown 生成结构化研究报告，包含摘要、背景、发现、建议、引用。引用处附上来源编号。"
+      "你是报告生成 Agent，请使用 Markdown 生成结构化研究报告，包含摘要、背景、发现、建议、引用。引用时保留来源编号，并区分 KB 知识库和 WEB 网页来源。"
     ),
     new HumanMessage(`用户问题：${prompt}\n洞察：${insights}\n来源：\n${sourcesText}`),
   ];
@@ -45,7 +52,7 @@ export async function runReportGeneration(
     await streamTokens(
       client,
       baseMessage,
-      tapStream(chatStream(messages, client.abortController.signal), (token) => {
+      tapStream(chatStream(messages as any, client.abortController.signal), (token) => {
         markdown += token;
       })
     );

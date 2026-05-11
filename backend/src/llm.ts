@@ -26,19 +26,6 @@ const fallbackRespond = async (messages: ChatMessage[]) => {
   return `（演示模式）根据指令生成的简要回复：${promptText}`;
 };
 
-// // 给大模型发消息，并接收他的返回信息
-// export async function chatOnce(messages: ChatMessage[]): Promise<string> {
-//   if (!hasDeepseekKey) {
-//     return fallbackRespond(messages);
-//   }
-//   const client = buildClient();
-//   const response = await client.invoke(messages);
-//   if (Array.isArray(response.content)) {
-//     return response.content.map((c: any) => c.text ?? "").join("");
-//   }
-//   return String(response.content);
-// }
-// chatOnce函数是直接接收大模型返回的回答的
 // 1. 接收 signal 参数 
 export async function chatOnce(
   messages: ChatMessage[], 
@@ -59,7 +46,7 @@ export async function chatOnce(
 }
 
 
-// 【新增真流式】利用 AsyncGenerator 实时产出 Token
+// 利用 AsyncGenerator 实时产出 Token
 export async function* chatStream(
   messages: ChatMessage[],
   signal? : AbortSignal

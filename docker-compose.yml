@@ -1,0 +1,41 @@
+services:
+  chroma:
+    image: chromadb/chroma:1.3.5
+    container_name: deepagent-chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: deepagent-backend
+    depends_on:
+      - chroma
+    env_file:
+      - ./backend/src/.env
+    environment:
+      PORT: 3001
+      CHROMA_URL: http://chroma:8000
+      CHROMA_COLLECTION: deep-research-kb
+      RAG_KNOWLEDGE_DIR: knowledge
+    volumes:
+      - ./backend/knowledge:/app/knowledge
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+    container_name: deepagent-web
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  chroma_data:

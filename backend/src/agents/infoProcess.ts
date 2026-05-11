@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
-import { SSEClient, endTextStream, startTextStream, streamTokens } from "../sse";
-import { TavilyResult } from "../types";
-import { chatStream } from "../llm";
+import { SSEClient, endTextStream, startTextStream, streamTokens } from "../sse.js";
+import { RetrievedSource } from "../types.js";
+import { chatStream } from "../llm.js";
 
 export type ProcessingResult = {
   insights: string;
@@ -20,10 +20,15 @@ async function* tapStream(
 export async function runInformationProcessing(
   client: SSEClient,
   prompt: string,
-  results: TavilyResult[]
+  results: RetrievedSource[]
 ): Promise<ProcessingResult> {
   const formatted = results
-    .map((r, idx) => `${idx + 1}. ${r.title}\n${r.content}\n来源: ${r.url}`)
+    .map(
+      (r, idx) =>
+        `${idx + 1}. [${r.sourceType.toUpperCase()}] ${r.title}\n${r.content}\n来源: ${
+          r.url ?? "N/A"
+        }`
+    )
     .join("\n\n");
 
   const messageId = uuid();
@@ -34,7 +39,8 @@ export async function runInformationProcessing(
     [
       {
         role: "system",
-        content: "你是信息处理专家，请合并去重搜索结果，提炼关键洞察，强调可行结论和数据点。",
+        content:
+          "你是信息处理专家。请合并去重混合检索结果，明确区分 KB 知识库与 WEB 网页来源；如果出现冲突，要指出冲突点与更可信的来源，并输出重点洞察、可执行结论和关键数据点。",
       } as any,
       {
         role: "human",

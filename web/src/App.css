@@ -10,6 +10,18 @@
   backdrop-filter: blur(8px);
 }
 
+.right-sider {
+  border-left: 1px solid #e5e7eb;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  display: flex !important;
+  flex-direction: column;
+  gap: 16px;
+  height: 100vh;
+  overflow: hidden;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -201,6 +213,84 @@
   overflow-y: auto;
 }
 
+.knowledge-panel {
+  border: 1px solid #dbe7e4;
+  border-radius: 14px;
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(240, 253, 250, 0.8), rgba(255, 255, 255, 0.95));
+  box-shadow: 0 10px 24px rgba(15, 118, 110, 0.08);
+  max-height: 48%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.knowledge-panel-header {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.knowledge-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.knowledge-filter-tag {
+  cursor: pointer;
+  user-select: none;
+}
+
+.knowledge-panel .ant-list {
+  overflow: auto;
+}
+
+.knowledge-list {
+  flex: 1;
+  min-height: 140px;
+  overflow: auto;
+}
+
+.knowledge-item {
+  align-items: flex-start !important;
+}
+
+.knowledge-item-name {
+  word-break: break-word;
+}
+
+.knowledge-item-path {
+  word-break: break-all;
+}
+
+.knowledge-preview {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #dbe7e4;
+  min-height: 180px;
+  overflow: hidden;
+}
+
+.knowledge-preview-meta {
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.knowledge-preview-content {
+  margin: 0;
+  padding: 12px;
+  background: #0b1120;
+  color: #e2e8f0;
+  border-radius: 10px;
+  overflow: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .session-item {
   padding: 8px 10px;
   border-radius: 8px;
@@ -234,6 +324,16 @@
     width: 100% !important;
     border-right: none;
     border-bottom: 1px solid #e5e7eb;
+  }
+  .right-sider {
+    width: 100% !important;
+    border-left: none;
+    border-top: 1px solid #e5e7eb;
+    height: auto;
+    max-height: none;
+  }
+  .knowledge-panel {
+    max-height: none;
   }
 }
 

@@ -59,13 +59,25 @@ export type Message =
       };
     };
 
-export type TavilyResult = {
+export type SourceType = "web" | "kb" | "session";
+
+export type RetrievedSource = {
+  id: string;
   title: string;
-  url: string;
+  url?: string;
   content: string;
+  sourceType: SourceType;
+  score?: number;
+  docId?: string;
+  chunkId?: string;
 };
 
 export type ResearchContext = {
   prompt: string;
-  sources: TavilyResult[];
+  sources: RetrievedSource[];
+};
+
+export type TavilyResult = RetrievedSource & {
+  sourceType: "web";
+  url: string;
 };

@@ -1,0 +1,4 @@
+[15400:22564:0506/114106.746:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[15400:21252:0506/114106.819:ERROR:chrome\browser\extensions\external_registry_loader_win.cc:206] File C:\Users\doctor\AppData\Local\ChromeExtensionCache\xl_ext_chrome.crx for key Software\Microsoft\Edge\Extensions\ncennffkjdiamlpmcbajkmaiiiddgioo does not exist or is not readable.
+[15400:8092:0506/114107.541:ERROR:chrome\browser\importer\edge_china_browsers\edge_qqbrowser_importer_utils_win.cc:199] QQBrowser profile preference file doesn't exist
+[15400:22564:0506/114107.903:ERROR:chrome\browser\task_manager\providers\fallback_task_provider.cc:126] Every renderer should have at least one task provided by a primary task provider. If a "Renderer" fallback task is shown, it is a bug. If you have repro steps, please file a new bug and tag it as a dependency of crbug.com/40528867.

@@ -1,88 +1,17 @@
-// import { useCallback, useEffect, useRef, useState } from "react";
-// import type { ConnectionStatus, Message } from "../types/messages";
-
-// const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
-
-// type Props = {
-//   sessionId: string;
-//   onMessage: (message: Message) => void;
-//   onDone?: () => void;
-// };
-
-// export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
-//   const [status, setStatus] = useState<ConnectionStatus>("idle");
-//   const [retry, setRetry] = useState(0);
-//   const [currentPrompt, setCurrentPrompt] = useState<string | null>(null);
-//   const esRef = useRef<EventSource | null>(null);
-
-//   const closeStream = useCallback((nextStatus?: ConnectionStatus) => {
-//     esRef.current?.close();
-//     esRef.current = null;
-//     if (nextStatus) setStatus(nextStatus);
-//   }, []);
-
-//   const pause = useCallback(() => {
-//     closeStream("paused");
-//     setRetry(0);
-//   }, [closeStream]);
-
-//   const openStream = useCallback(
-//     (prompt: string, isReconnect = false) => {
-//       closeStream();
-//       setStatus(isReconnect ? "reconnecting" : "streaming");
-//       setCurrentPrompt(prompt);
-//       const url = `${API_BASE.replace(/\/$/, "")}/api/chat?prompt=${encodeURIComponent(
-//         prompt
-//       )}&sessionId=${sessionId}`;
-//       const es = new EventSource(url);
-//       es.onmessage = (event) => {
-//         try {
-//           const message = JSON.parse(event.data) as Message;
-//           onMessage(message);
-//         } catch (err) {
-//           console.error("解析消息失败", err, event.data);
-//         }
-//       };
-//       es.addEventListener("done", () => {
-//         setStatus("idle");
-//         closeStream("idle");
-//         setRetry(0);
-//         onDone?.();
-//       });
-//       es.addEventListener("error", () => {
-//         setStatus("error");
-//         closeStream("error");
-//       });
-//       esRef.current = es;
-//     },
-//     [closeStream, onDone, onMessage, sessionId]
-//   );
-
-//   useEffect(() => {
-//     if (status !== "error" || !currentPrompt) return;
-//     const timer = setTimeout(() => {
-//       const next = Math.min(5, retry + 1);
-//       setRetry(next);
-//       openStream(currentPrompt, true);
-//     }, Math.min(10_000, 800 * Math.pow(2, retry)));
-//     return () => clearTimeout(timer);
-//   }, [status, retry, currentPrompt, openStream]);
-
-//   useEffect(() => () => closeStream(), [closeStream]);
-
-//   return {
-//     status,
-//     start: openStream,
-//     close: closeStream,
-//     pause,
-//   };
-// }
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import type { ConnectionStatus, Message } from "../types/messages";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+const STREAM_FLUSH_MS = 40;
+const RUN_STORAGE_PREFIX = "research-assistant-active-run:";
+
+type StoredRun = {
+  runId: string;
+  prompt: string;
+  lastSeq: number;
+  status: "running" | "completed" | "failed" | "cancelled";
+};
 
 type Props = {
   sessionId: string;
@@ -94,17 +23,92 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [retry, setRetry] = useState(0);
   const [currentPrompt, setCurrentPrompt] = useState<string | null>(null);
-  
-  // 架构核心 1：引入 AbortController，使得流式请求可以被真正地“物理中断”
   const ctrlRef = useRef<AbortController | null>(null);
+  const onMessageRef = useRef(onMessage);
+  const onDoneRef = useRef(onDone);
+  const runIdRef = useRef<string | null>(null);
+  const lastSeqRef = useRef(0);
+  const activePromptRef = useRef<string | null>(null);
+  const restoredSessionRef = useRef<string | null>(null);
+  const pendingTextRef = useRef(new Map<string, Extract<Message, { type: "text" }>>());
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const closeStream = useCallback((nextStatus?: ConnectionStatus) => {
-    if (ctrlRef.current) {
-      ctrlRef.current.abort(); // 物理终止底层 Fetch 连接
-      ctrlRef.current = null;
+  const runStorageKey = `${RUN_STORAGE_PREFIX}${sessionId}`;
+
+  const saveStoredRun = useCallback(
+    (patch: Partial<StoredRun> = {}) => {
+      if (!runIdRef.current || !activePromptRef.current) return;
+
+      const stored: StoredRun = {
+        runId: runIdRef.current,
+        prompt: activePromptRef.current,
+        lastSeq: lastSeqRef.current,
+        status: "running",
+        ...patch,
+      };
+
+      localStorage.setItem(runStorageKey, JSON.stringify(stored));
+    },
+    [runStorageKey]
+  );
+
+  useEffect(() => {
+    onMessageRef.current = onMessage;
+  }, [onMessage]);
+
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  }, [onDone]);
+
+  const flushPendingText = useCallback(() => {
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
     }
-    if (nextStatus) setStatus(nextStatus);
+
+    const pending = pendingTextRef.current;
+    if (!pending.size) return;
+
+    const messages = Array.from(pending.values());
+    pending.clear();
+    messages.forEach((message) => onMessageRef.current(message));
   }, []);
+
+  const queueMessage = useCallback(
+    (message: Message) => {
+      if (message.type !== "text" || !message.streaming) {
+        flushPendingText();
+        onMessageRef.current(message);
+        return;
+      }
+
+      const pending = pendingTextRef.current;
+      const existing = pending.get(message.id);
+      pending.set(
+        message.id,
+        existing
+          ? { ...existing, content: existing.content + message.content, streaming: true }
+          : message
+      );
+
+      if (!flushTimerRef.current) {
+        flushTimerRef.current = setTimeout(flushPendingText, STREAM_FLUSH_MS);
+      }
+    },
+    [flushPendingText]
+  );
+
+  const closeStream = useCallback(
+    (nextStatus?: ConnectionStatus) => {
+      flushPendingText();
+      if (ctrlRef.current) {
+        ctrlRef.current.abort();
+        ctrlRef.current = null;
+      }
+      if (nextStatus) setStatus(nextStatus);
+    },
+    [flushPendingText]
+  );
 
   const pause = useCallback(() => {
     closeStream("paused");
@@ -116,75 +120,128 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
       closeStream();
       setStatus(isReconnect ? "reconnecting" : "streaming");
       setCurrentPrompt(prompt);
+      activePromptRef.current = prompt;
+
+      if (!isReconnect) {
+        runIdRef.current = null;
+        lastSeqRef.current = 0;
+        localStorage.removeItem(runStorageKey);
+      }
 
       const ctrl = new AbortController();
       ctrlRef.current = ctrl;
 
       const url = `${API_BASE.replace(/\/$/, "")}/api/chat`;
 
-      // 架构核心 2：使用 fetchEventSource 发起 POST 请求
       fetchEventSource(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "text/event-stream"
+          Accept: "text/event-stream",
         },
-        // 将核心数据放入请求体（Body）中，彻底解除长度封印与明文泄露风险
-        body: JSON.stringify({ prompt, sessionId }),
+        body: JSON.stringify({
+          prompt,
+          sessionId,
+          runId: isReconnect ? runIdRef.current : undefined,
+          since: isReconnect ? lastSeqRef.current : 0,
+        }),
         signal: ctrl.signal,
-        
-        //SSE链接建立后，立即执行。每次连接只执行一次
+
         async onopen(response) {
           if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
-            return; // 握手成功
+            return;
           }
-          throw new Error(`连接流失败, 状态码: ${response.status}`);
+          throw new Error(`Failed to open SSE stream: ${response.status}`);
         },
-        
-        //每次收到消息时执行
+
         onmessage(event) {
+          const seq = Number(event.id);
+          if (Number.isFinite(seq) && seq > lastSeqRef.current) {
+            lastSeqRef.current = seq;
+            saveStoredRun();
+          }
+
+          if (event.event === "run") {
+            try {
+              const payload = JSON.parse(event.data) as {
+                runId?: string;
+                status?: StoredRun["status"];
+              };
+              if (payload.runId) {
+                runIdRef.current = payload.runId;
+                saveStoredRun({ status: payload.status ?? "running" });
+              }
+            } catch (err: unknown) {
+              console.error("Failed to parse run event", err, event.data);
+            }
+            return;
+          }
+
           if (event.event === "done") {
+            flushPendingText();
+            saveStoredRun({ status: "completed" });
             setStatus("idle");
             closeStream("idle");
             setRetry(0);
-            onDone?.();
+            onDoneRef.current?.();
             return;
           }
+
           if (event.event === "error") {
+            flushPendingText();
+            saveStoredRun({ status: "failed" });
             setStatus("error");
+            setCurrentPrompt(null);
             closeStream("error");
             return;
           }
-          
-          // 默认 message 事件
+
           if (event.event === "message" || !event.event) {
             try {
               const message = JSON.parse(event.data) as Message;
-              onMessage(message);
+              queueMessage(message);
             } catch (err: unknown) {
-              console.error("解析消息失败", err, event.data);
+              console.error("Failed to parse SSE message", err, event.data);
             }
           }
         },
-        
+
         onerror(err: unknown) {
-          console.error("SSE 连接异常:", err);
+          flushPendingText();
+          console.error("SSE connection error:", err);
           setStatus("error");
-          // 抛出错误以阻断 fetchEventSource 内部的默认重连，交由我们外部的 useEffect 指数退避逻辑接管
-          throw err; 
-        }
+          throw err;
+        },
       }).catch((err: unknown) => {
-        // 如果是我们手动触发的 abort，忽略报错
         if (err instanceof Error && err.name === "AbortError") {
           return;
         }
         setStatus("error");
       });
     },
-    [closeStream, onDone, onMessage, sessionId]
+    [closeStream, flushPendingText, queueMessage, runStorageKey, saveStoredRun, sessionId]
   );
 
-  // 原有的重连指数退避逻辑保持不变
+  useEffect(() => {
+    if (restoredSessionRef.current === sessionId) return;
+    restoredSessionRef.current = sessionId;
+
+    try {
+      const raw = localStorage.getItem(runStorageKey);
+      if (!raw) return;
+
+      const stored = JSON.parse(raw) as StoredRun;
+      if (stored.status !== "running" || !stored.runId || !stored.prompt) return;
+
+      runIdRef.current = stored.runId;
+      lastSeqRef.current = stored.lastSeq;
+      activePromptRef.current = stored.prompt;
+      openStream(stored.prompt, true);
+    } catch (err: unknown) {
+      console.error("Failed to restore active run", err);
+    }
+  }, [openStream, runStorageKey, sessionId]);
+
   useEffect(() => {
     if (status !== "error" || !currentPrompt) return;
     const timer = setTimeout(() => {
@@ -195,7 +252,13 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
     return () => clearTimeout(timer);
   }, [status, retry, currentPrompt, openStream]);
 
-  useEffect(() => () => closeStream(), [closeStream]);
+  useEffect(
+    () => () => {
+      flushPendingText();
+      closeStream();
+    },
+    [closeStream, flushPendingText]
+  );
 
   return { status, start: openStream, close: closeStream, pause };
 }
