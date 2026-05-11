@@ -16,7 +16,7 @@ type Props = {
   onDecision: (actionId: string, decision: "approve" | "reject") => Promise<void>;
 };
 
-export const MessageRenderer: React.FC<Props> = ({ message, onResend, onRetry, onDecision }) => {
+const MessageRendererComponent: React.FC<Props> = ({ message, onResend, onRetry, onDecision }) => {
   const copy = async (text: string) => {
     await navigator.clipboard.writeText(text);
   };
@@ -89,3 +89,5 @@ export const MessageRenderer: React.FC<Props> = ({ message, onResend, onRetry, o
     </Card>
   );
 };
+
+export const MessageRenderer = React.memo(MessageRendererComponent);

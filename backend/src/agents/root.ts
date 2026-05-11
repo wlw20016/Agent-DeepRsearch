@@ -53,7 +53,7 @@ async function buildPlan(prompt: string): Promise<PlanStep[]> {
 }
 
 async function maybeRequestApproval(client: SSEClient, reason: string): Promise<boolean> {
-  const approval = createApproval();
+  const approval = createApproval(); // { id, wait: () => wait }
   sendMessage(client, {
     id: uuid(),
     type: "humanInput",

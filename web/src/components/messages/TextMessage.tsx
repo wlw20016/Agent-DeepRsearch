@@ -1,10 +1,8 @@
 import React, { useCallback, useRef } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { Tag, Space, Tooltip, Button, message as antdMessage } from "antd";
 import { CopyOutlined, FileWordOutlined } from "@ant-design/icons";
 import type { Message } from "../../types/messages";
+import { MarkdownRenderer } from "../MarkdownRenderer";
 
 type Props = {
   message: Extract<Message, { type: "text" }>;
@@ -84,10 +82,16 @@ export const TextMessage: React.FC<Props> = ({ message, actions }) => {
         {message.streaming && <span className="streaming-dot">···</span>}
       </div>
 
-      <div ref={contentRef} className={`markdown-body ${message.streaming ? "streaming" : ""}`}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-          {message.content}
-        </ReactMarkdown>
+      <div ref={contentRef}>
+        <MarkdownRenderer
+          content={message.content}
+          className={`markdown-body ${message.streaming ? "streaming" : ""}`}
+          fallback={
+            <div className={`markdown-body ${message.streaming ? "streaming" : ""}`}>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", font: "inherit" }}>{message.content}</pre>
+            </div>
+          }
+        />
       </div>
     </div>
   );

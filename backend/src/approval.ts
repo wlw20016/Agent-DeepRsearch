@@ -24,6 +24,7 @@ export function createApproval(): { id: string; wait: () => Promise<Decision> } 
       waiters.delete(id);
     }
   }, 60_000);
+  
   return { id, wait: () => wait };
 }
 

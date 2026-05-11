@@ -1,23 +1,28 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Button, Input, Space } from "antd";
-import { SendOutlined, PauseCircleOutlined } from "@ant-design/icons";
+import { SendOutlined, PauseCircleOutlined, UploadOutlined } from "@ant-design/icons";
 
 type Props = {
   onSend: (text: string) => void;
+  onUpload?: (files: FileList) => void;
   placeholder?: string;
   initialText?: string;
   isStreaming?: boolean;
+  isUploading?: boolean;
   onPause?: () => void;
 };
 
 export const ChatInput: React.FC<Props> = ({
   onSend,
+  onUpload,
   placeholder,
   initialText,
   isStreaming = false,
+  isUploading = false,
   onPause,
 }) => {
   const [text, setText] = useState(initialText ?? "");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleSend = () => {
     if (!text.trim()) return;
@@ -27,6 +32,13 @@ export const ChatInput: React.FC<Props> = ({
 
   const handlePause = () => {
     onPause?.();
+  };
+
+  const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
+    if (event.target.files?.length) {
+      onUpload?.(event.target.files);
+    }
+    event.target.value = "";
   };
 
   return (
@@ -44,6 +56,22 @@ export const ChatInput: React.FC<Props> = ({
         }}
         disabled={isStreaming}
       />
+      <input
+        ref={fileInputRef}
+        type="file"
+        hidden
+        multiple
+        accept=".md,.txt,.html,.htm,.json"
+        onChange={handleFileChange}
+      />
+      <Button
+        loading={isUploading}
+        icon={<UploadOutlined />}
+        disabled={isStreaming}
+        onClick={() => fileInputRef.current?.click()}
+      >
+        {"上传文档"}
+      </Button>
       {isStreaming ? (
         <Button danger icon={<PauseCircleOutlined />} onClick={handlePause}>
           {"\u6682\u505c"}

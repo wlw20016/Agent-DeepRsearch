@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Layout, Typography, message as antdMessage, Badge, Space, Tag } from "antd";
+import { Badge, Layout, Space, Tag, Typography, message as antdMessage } from "antd";
 import { v4 as uuid } from "uuid";
 import { ChatInput } from "./components/ChatInput";
-import { MessageRenderer } from "./components/MessageRenderer";
+import {
+  KnowledgePanel,
+  type KnowledgeDetail,
+  type KnowledgeItem,
+} from "./components/KnowledgePanel";
+import { MessageListItem } from "./components/MessageListItem";
 import { SessionList } from "./components/SessionList";
-import type { ConnectionStatus, Message, Session } from "./types/messages";
-import { useAgentStream } from "./hooks/useAgentStream";
 import { TimelineNav } from "./components/messages/TimelineNav";
+import { useAgentStream } from "./hooks/useAgentStream";
+import type { ConnectionStatus, Message, Session } from "./types/messages";
 import "./App.css";
 
 const { Header, Content, Sider } = Layout;
@@ -18,10 +23,18 @@ const LABEL_RECONNECTING = "重连中";
 const LABEL_ERROR = "连接异常";
 const LABEL_IDLE = "空闲";
 const LABEL_PAUSED = "已暂停";
-const LABEL_HEADER = "AI深度研究助手";
-const FOOTER_HINT = "支持 Markdown，断线自动重连，工具调用可折叠查看。";
+const LABEL_HEADER = "AI 深度研究助手";
+const FOOTER_HINT = "支持 Markdown、知识库上传、搜索、预览、断线重连和工具调用可视化。";
 const SCROLL_BOTTOM_THRESHOLD = 16;
 const SCROLL_THROTTLE_MS = 80;
+
+type UploadResponse =
+  | { ok: true; documentCount: number; chunkCount: number; files: string[] }
+  | { error?: string; unsupported?: string[] };
+
+type KnowledgeListResponse = { ok: true; items: KnowledgeItem[] } | { error?: string };
+
+type KnowledgeDetailResponse = { ok: true; item: KnowledgeDetail } | { error?: string };
 
 function throttle<T extends (...args: unknown[]) => void>(fn: T, wait: number): T {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -80,11 +93,21 @@ function loadSessions(): Session[] {
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>(loadSessions);
   const [activeId, setActiveId] = useState<string>(sessions[0]?.id ?? "");
+  const [isUploading, setIsUploading] = useState(false);
+  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [knowledgeBusyPath, setKnowledgeBusyPath] = useState<string | null>(null);
+  const [knowledgeRefreshingAll, setKnowledgeRefreshingAll] = useState(false);
+  const [knowledgePreviewPath, setKnowledgePreviewPath] = useState<string | null>(null);
+  const [knowledgePreviewLoading, setKnowledgePreviewLoading] = useState(false);
+  const [knowledgePreviewItem, setKnowledgePreviewItem] = useState<KnowledgeDetail | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   const [hasOverflow, setHasOverflow] = useState(false);
+
+  const apiBase = `${(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "")}`;
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeId) ?? sessions[0],
@@ -134,17 +157,8 @@ export default function App() {
 
           if (existing.type === "text" && incoming.type === "text") {
             nextMessages[existingIndex] = incoming.streaming
-              ? {
-                  ...existing,
-                  content: existing.content + incoming.content,
-                  streaming: true,
-                }
-              : {
-                  ...existing,
-                  ...incoming,
-                  content: incoming.content || existing.content,
-                  streaming: false,
-                };
+              ? { ...existing, content: existing.content + incoming.content, streaming: true }
+              : { ...existing, ...incoming, content: incoming.content || existing.content, streaming: false };
           } else {
             nextMessages[existingIndex] = incoming;
           }
@@ -156,7 +170,12 @@ export default function App() {
     [activeSession?.id]
   );
 
-  const stream = useAgentStream({
+  const {
+    status: streamStatus,
+    start: startStream,
+    close: closeStream,
+    pause: pauseStream,
+  } = useAgentStream({
     sessionId: activeSession?.id ?? "default",
     onMessage: appendMessage,
     onDone: () => {
@@ -167,9 +186,7 @@ export default function App() {
           return {
             ...session,
             messages: session.messages.map((message) =>
-              message.type === "text" && message.streaming
-                ? { ...message, streaming: false }
-                : message
+              message.type === "text" && message.streaming ? { ...message, streaming: false } : message
             ),
           };
         })
@@ -177,24 +194,203 @@ export default function App() {
     },
   });
 
-  const updateUserMessage = (text: string) => {
-    const userMessage: Message = { id: uuid(), type: "text", role: "user", content: text };
-    autoScrollRef.current = true;
-    setAutoScrollEnabled(true);
-    scrollToBottom("auto");
+  const appendSystemMessage = useCallback(
+    (content: string) => {
+      const systemMessage: Message = { id: uuid(), type: "text", role: "system", content };
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === activeSession?.id
+            ? { ...session, messages: [...session.messages, systemMessage] }
+            : session
+        )
+      );
+    },
+    [activeSession?.id]
+  );
 
-    setSessions((prev) =>
-      prev.map((session) =>
-        session.id === activeSession?.id
-          ? { ...session, messages: [...session.messages, userMessage] }
-          : session
-      )
-    );
+  const updateUserMessage = useCallback(
+    (text: string) => {
+      const userMessage: Message = { id: uuid(), type: "text", role: "user", content: text };
+      autoScrollRef.current = true;
+      setAutoScrollEnabled(true);
+      scrollToBottom("auto");
 
-    stream.start(text);
-  };
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === activeSession?.id
+            ? { ...session, messages: [...session.messages, userMessage] }
+            : session
+        )
+      );
 
-  const isStreaming = stream.status === "streaming";
+      startStream(text);
+    },
+    [activeSession?.id, scrollToBottom, startStream]
+  );
+
+  const loadKnowledgeItems = useCallback(async () => {
+    setKnowledgeLoading(true);
+    try {
+      const response = await fetch(`${apiBase}/api/knowledge`);
+      const data = (await response.json()) as KnowledgeListResponse;
+      if (!response.ok || !("ok" in data && data.ok)) {
+        throw new Error(("error" in data && data.error) || "加载知识库列表失败");
+      }
+
+      setKnowledgeItems(data.items);
+    } catch (error: unknown) {
+      const messageText = error instanceof Error ? error.message : "加载知识库列表失败";
+      antdMessage.error(messageText);
+    } finally {
+      setKnowledgeLoading(false);
+    }
+  }, [apiBase]);
+
+  const loadKnowledgePreview = useCallback(
+    async (relativePath: string) => {
+      setKnowledgePreviewPath(relativePath);
+      setKnowledgePreviewLoading(true);
+      try {
+        const response = await fetch(
+          `${apiBase}/api/knowledge/detail?path=${encodeURIComponent(relativePath)}`
+        );
+        const data = (await response.json()) as KnowledgeDetailResponse;
+        if (!response.ok || !("ok" in data && data.ok)) {
+          throw new Error(("error" in data && data.error) || "加载文档预览失败");
+        }
+
+        setKnowledgePreviewItem(data.item);
+      } catch (error: unknown) {
+        const messageText = error instanceof Error ? error.message : "加载文档预览失败";
+        antdMessage.error(messageText);
+      } finally {
+        setKnowledgePreviewLoading(false);
+      }
+    },
+    [apiBase]
+  );
+
+  const handleUpload = useCallback(
+    async (files: FileList) => {
+      const formData = new FormData();
+      Array.from(files).forEach((file) => formData.append("files", file));
+
+      setIsUploading(true);
+      try {
+        const response = await fetch(`${apiBase}/api/knowledge/upload`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = (await response.json()) as UploadResponse;
+        if (!response.ok || !("ok" in data && data.ok)) {
+          const errorPayload = "error" in data ? data : undefined;
+          const unsupportedHint = errorPayload?.unsupported?.length
+            ? `，不支持：${errorPayload.unsupported.join("、")}`
+            : "";
+          throw new Error(`${errorPayload?.error ?? "上传失败"}${unsupportedHint}`);
+        }
+
+        antdMessage.success(`已入库 ${data.documentCount} 个文档，生成 ${data.chunkCount} 个切片`);
+        appendSystemMessage(
+          `知识库入库完成：${data.files.join("、")}。\n已处理 ${data.documentCount} 个文档，生成 ${data.chunkCount} 个切片。`
+        );
+        await loadKnowledgeItems();
+        if (data.files[0]) {
+          await loadKnowledgePreview(data.files[0]);
+        }
+      } catch (error: unknown) {
+        const messageText = error instanceof Error ? error.message : "上传失败";
+        antdMessage.error(messageText);
+        appendSystemMessage(`知识库入库失败：${messageText}`);
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [apiBase, appendSystemMessage, loadKnowledgeItems, loadKnowledgePreview]
+  );
+
+  const handleDeleteKnowledge = useCallback(
+    async (relativePath: string) => {
+      setKnowledgeBusyPath(relativePath);
+      try {
+        const response = await fetch(
+          `${apiBase}/api/knowledge?path=${encodeURIComponent(relativePath)}`,
+          { method: "DELETE" }
+        );
+        const data = (await response.json()) as { ok?: boolean; deleted?: string; error?: string };
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error ?? "删除知识库文档失败");
+        }
+
+        antdMessage.success(`已删除 ${relativePath}`);
+        appendSystemMessage(`知识库文档已删除：${relativePath}`);
+        if (knowledgePreviewPath === relativePath) {
+          setKnowledgePreviewItem(null);
+          setKnowledgePreviewPath(null);
+        }
+        await loadKnowledgeItems();
+      } catch (error: unknown) {
+        const messageText = error instanceof Error ? error.message : "删除知识库文档失败";
+        antdMessage.error(messageText);
+      } finally {
+        setKnowledgeBusyPath(null);
+      }
+    },
+    [apiBase, appendSystemMessage, knowledgePreviewPath, loadKnowledgeItems]
+  );
+
+  const handleReingestKnowledge = useCallback(
+    async (relativePath?: string) => {
+      if (relativePath) {
+        setKnowledgeBusyPath(relativePath);
+      } else {
+        setKnowledgeRefreshingAll(true);
+      }
+
+      try {
+        const response = await fetch(`${apiBase}/api/knowledge/reingest`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(relativePath ? { path: relativePath } : {}),
+        });
+        const data = (await response.json()) as {
+          ok?: boolean;
+          documentCount?: number;
+          chunkCount?: number;
+          error?: string;
+        };
+
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error ?? "重建知识库失败");
+        }
+
+        const scopeLabel = relativePath || "全部文档";
+        antdMessage.success(`已重建 ${scopeLabel}`);
+        appendSystemMessage(
+          `知识库重建完成：${scopeLabel}。处理 ${data.documentCount ?? 0} 个文档，生成 ${
+            data.chunkCount ?? 0
+          } 个切片。`
+        );
+        await loadKnowledgeItems();
+        if (relativePath) {
+          await loadKnowledgePreview(relativePath);
+        }
+      } catch (error: unknown) {
+        const messageText = error instanceof Error ? error.message : "重建知识库失败";
+        antdMessage.error(messageText);
+      } finally {
+        if (relativePath) {
+          setKnowledgeBusyPath(null);
+        } else {
+          setKnowledgeRefreshingAll(false);
+        }
+      }
+    },
+    [apiBase, appendSystemMessage, loadKnowledgeItems, loadKnowledgePreview]
+  );
+
+  const isStreaming = streamStatus === "streaming";
 
   useEffect(() => {
     autoScrollRef.current = true;
@@ -203,13 +399,17 @@ export default function App() {
   }, [activeSession?.id, scrollToBottom]);
 
   useEffect(() => {
+    void loadKnowledgeItems();
+  }, [loadKnowledgeItems]);
+
+  useEffect(() => {
     updateScrollMetrics();
   }, [activeSession?.messages, updateScrollMetrics]);
 
   useLayoutEffect(() => {
     if (!autoScrollEnabled) return;
     requestAnimationFrame(() => scrollToBottom("auto"));
-  }, [activeSession?.messages, autoScrollEnabled, scrollToBottom, stream.status]);
+  }, [activeSession?.messages, autoScrollEnabled, scrollToBottom, streamStatus]);
 
   useEffect(() => {
     const element = messagesRef.current;
@@ -254,27 +454,24 @@ export default function App() {
     };
   }, [scrollToBottom, updateScrollMetrics]);
 
-  const onDecision = async (actionId: string, decision: "approve" | "reject") => {
-    const response = await fetch(
-      `${(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "")}/api/hil`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actionId, decision }),
-      }
-    );
+  const onDecision = useCallback(async (actionId: string, decision: "approve" | "reject") => {
+    const response = await fetch(`${apiBase}/api/hil`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionId, decision }),
+    });
 
     if (!response.ok) {
       antdMessage.error("发送审批失败");
     }
-  };
+  }, [apiBase]);
 
-  const handleResend = (text: string) => updateUserMessage(text);
-  const handleRetry = (message: Message) => {
+  const handleResend = useCallback((text: string) => updateUserMessage(text), [updateUserMessage]);
+  const handleRetry = useCallback((message: Message) => {
     if (message.type === "text") {
       updateUserMessage(message.content);
     }
-  };
+  }, [updateUserMessage]);
 
   const createSession = () => {
     const session: Session = {
@@ -288,7 +485,7 @@ export default function App() {
     setActiveId(session.id);
   };
 
-  const setTitleFromPrompt = (prompt: string) => {
+  const setTitleFromPrompt = useCallback((prompt: string) => {
     setSessions((prev) =>
       prev.map((session) =>
         session.id === activeSession?.id
@@ -296,10 +493,18 @@ export default function App() {
           : session
       )
     );
-  };
+  }, [activeSession?.id]);
+
+  const handleMessageResend = useCallback(
+    (text: string) => {
+      setTitleFromPrompt(text);
+      handleResend(text);
+    },
+    [handleResend, setTitleFromPrompt]
+  );
 
   const renderStatusTag = () => {
-    switch (stream.status) {
+    switch (streamStatus) {
       case "streaming":
         return <Tag color="green" style={{ marginLeft: 8 }}>{LABEL_GENERATING}</Tag>;
       case "reconnecting":
@@ -331,7 +536,7 @@ export default function App() {
           activeId={activeSession?.id ?? ""}
           onCreate={createSession}
           onSelect={(id) => {
-            stream.close("idle");
+            closeStream("idle");
             setActiveId(id);
           }}
         />
@@ -347,15 +552,15 @@ export default function App() {
           </div>
           <Badge
             status={
-              stream.status === "streaming"
+              streamStatus === "streaming"
                 ? "processing"
-                : stream.status === "reconnecting"
+                : streamStatus === "reconnecting"
                 ? "warning"
-                : stream.status === "error"
+                : streamStatus === "error"
                 ? "error"
                 : "default"
             }
-            text={badgeTextMap[stream.status]}
+            text={badgeTextMap[streamStatus]}
           />
         </Header>
 
@@ -363,18 +568,22 @@ export default function App() {
           <div className="content-inner">
             <div className="messages-container">
               <div className="messages" ref={messagesRef}>
+                {/* 渲染消息列表的时候，把对应会话的不同消息，放到 MessageListItem中 
+                    之前接到的消息，消息id不变，消息内容message不变，
+                    三个处理的函数用useCallback包装过也不会变。
+
+                    MessageListItem使用React memo包装，那他就不会被渲染到。
+
+                    只有正在打印内容的列表项，内容才会不断改变，从而在渲染时执行，将content中的内容增量做更新
+                */}
                 {activeSession?.messages.map((message) => (
-                  <div key={message.id} id={`chat-msg-${message.id}`}>
-                    <MessageRenderer
-                      message={message}
-                      onResend={(text) => {
-                        setTitleFromPrompt(text);
-                        handleResend(text);
-                      }}
-                      onRetry={handleRetry}
-                      onDecision={onDecision}
-                    />
-                  </div>
+                  <MessageListItem
+                    key={message.id}
+                    message={message}
+                    onResend={handleMessageResend}
+                    onRetry={handleRetry}
+                    onDecision={onDecision}
+                  />
                 ))}
               </div>
 
@@ -388,7 +597,7 @@ export default function App() {
                     scrollToBottom("smooth");
                   }}
                 >
-                  ↓
+                  →
                 </button>
               )}
             </div>
@@ -400,8 +609,10 @@ export default function App() {
                     setTitleFromPrompt(text);
                     updateUserMessage(text);
                   }}
-                  isStreaming={stream.status === "streaming"}
-                  onPause={stream.pause}
+                  onUpload={handleUpload}
+                  isStreaming={streamStatus === "streaming"}
+                  isUploading={isUploading}
+                  onPause={pauseStream}
                 />
                 <Typography.Text type="secondary">{FOOTER_HINT}</Typography.Text>
               </Space>
@@ -410,17 +621,21 @@ export default function App() {
         </Content>
       </Layout>
 
-      <Sider
-        width={240}
-        theme="light"
-        style={{
-          borderLeft: "1px solid #e8e8e8",
-          padding: "16px",
-          display: "flex",
-          flexDirection: "column",
-          height: "100vh",
-        }}
-      >
+      <Sider width={320} theme="light" className="right-sider">
+        <KnowledgePanel
+          items={knowledgeItems}
+          loading={knowledgeLoading}
+          refreshingAll={knowledgeRefreshingAll}
+          busyPath={knowledgeBusyPath}
+          previewPath={knowledgePreviewPath}
+          previewLoading={knowledgePreviewLoading}
+          previewItem={knowledgePreviewItem}
+          onRefresh={() => void loadKnowledgeItems()}
+          onReingestAll={() => void handleReingestKnowledge()}
+          onReingestOne={(path) => void handleReingestKnowledge(path)}
+          onDeleteOne={(path) => void handleDeleteKnowledge(path)}
+          onPreview={(path) => void loadKnowledgePreview(path)}
+        />
         <TimelineNav messages={activeSession?.messages ?? []} />
       </Sider>
     </Layout>
