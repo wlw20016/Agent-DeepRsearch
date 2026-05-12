@@ -1,6 +1,7 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { v4 as uuid } from "uuid";
 import { createApproval } from "../approval.js";
+import { langgraphCheckpointer } from "../langgraphSqliteSaver.js";
 import { chatOnce } from "../llm.js";
 import { SSEClient, endTextStream, sendMessage, startTextStream } from "../sse.js";
 import { searchKnowledgeBase } from "../tools/rag.js";
@@ -57,6 +58,8 @@ export type ResearchGraphResult = {
 };
 
 const FALLBACK_REPORT_NAME = "research-summary";
+const MAX_PLAN_TASKS = 5;
+const GRAPH_RECURSION_LIMIT = 80;
 
 const ResearchState = Annotation.Root({
   prompt: Annotation<string>(),
@@ -188,7 +191,7 @@ async function buildTasks(prompt: string): Promise<ResearchTask[]> {
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
       if (Array.isArray(parsed) && parsed.length) {
-        return parsed.slice(0, 6).map((item, index) => normalizeTask(item, index, prompt));
+        return parsed.slice(0, MAX_PLAN_TASKS).map((item, index) => normalizeTask(item, index, prompt));
       }
     }
   } catch {
@@ -492,7 +495,8 @@ function buildFinalReportPrompt(state: ResearchStateValue) {
 
 export async function runResearchGraph(
   client: SSEClient,
-  prompt: string
+  prompt: string,
+  options: { runId?: string; resume?: boolean } = {}
 ): Promise<ResearchGraphResult> {
   const graph = new StateGraph(ResearchState)
     .addNode("planner", async (state: ResearchStateValue) => {
@@ -680,9 +684,16 @@ export async function runResearchGraph(
     .addEdge("sourceEvaluator", "process")
     .addEdge("process", "selectTask")
     .addEdge("report", END)
-    .compile();
+    .compile({ checkpointer: langgraphCheckpointer });
 
-  const result = await graph.invoke({ prompt });
+  const config = {
+    configurable: {
+      thread_id: options.runId ?? "default-research-thread",
+    },
+    durability: "sync" as const,
+    recursionLimit: GRAPH_RECURSION_LIMIT,
+  };
+  const result = await graph.invoke(options.resume ? null : { prompt }, config);
   return {
     reportMarkdown: result.reportMarkdown,
     aborted: result.aborted,

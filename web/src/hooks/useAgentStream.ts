@@ -10,14 +10,44 @@ type StoredRun = {
   runId: string;
   prompt: string;
   lastSeq: number;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
 };
+
+type StreamErrorPayload =
+  | string
+  | {
+      message?: string;
+      recoverable?: boolean;
+      status?: StoredRun["status"];
+      runId?: string;
+    };
 
 type Props = {
   sessionId: string;
   onMessage: (message: Message) => void;
   onDone?: () => void;
 };
+
+function isRecoverableErrorPayload(payload: StreamErrorPayload) {
+  if (typeof payload === "object") {
+    return Boolean(payload.recoverable);
+  }
+
+  const message = payload.toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("network") ||
+    message.includes("connection") ||
+    message.includes("fetch failed") ||
+    message.includes("socket") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("429") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504")
+  );
+}
 
 export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
@@ -29,6 +59,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
   const runIdRef = useRef<string | null>(null);
   const lastSeqRef = useRef(0);
   const activePromptRef = useRef<string | null>(null);
+  const shouldReconnectRef = useRef(false);
   const restoredSessionRef = useRef<string | null>(null);
   const pendingTextRef = useRef(new Map<string, Extract<Message, { type: "text" }>>());
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,6 +142,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
   );
 
   const pause = useCallback(() => {
+    shouldReconnectRef.current = false;
     closeStream("paused");
     setRetry(0);
   }, [closeStream]);
@@ -121,6 +153,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
       setStatus(isReconnect ? "reconnecting" : "streaming");
       setCurrentPrompt(prompt);
       activePromptRef.current = prompt;
+      shouldReconnectRef.current = true;
 
       if (!isReconnect) {
         runIdRef.current = null;
@@ -149,6 +182,8 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
 
         async onopen(response) {
           if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+            setRetry(0);
+            setStatus("streaming");
             return;
           }
           throw new Error(`Failed to open SSE stream: ${response.status}`);
@@ -180,6 +215,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
           if (event.event === "done") {
             flushPendingText();
             saveStoredRun({ status: "completed" });
+            shouldReconnectRef.current = false;
             setStatus("idle");
             closeStream("idle");
             setRetry(0);
@@ -187,12 +223,27 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
             return;
           }
 
-          if (event.event === "error") {
+          if (event.event === "runError" || event.event === "error") {
             flushPendingText();
-            saveStoredRun({ status: "failed" });
-            setStatus("error");
-            setCurrentPrompt(null);
-            closeStream("error");
+            let payload: StreamErrorPayload = event.data;
+            try {
+              payload = JSON.parse(event.data) as StreamErrorPayload;
+            } catch {
+              /* legacy string error payload */
+            }
+
+            const recoverable = isRecoverableErrorPayload(payload);
+            if (typeof payload === "object" && payload.runId) {
+              runIdRef.current = payload.runId;
+            }
+
+            saveStoredRun({ status: recoverable ? "interrupted" : "failed" });
+            shouldReconnectRef.current = recoverable;
+            setStatus(recoverable ? "reconnecting" : "error");
+            if (!recoverable) {
+              setCurrentPrompt(null);
+            }
+            closeStream(recoverable ? "reconnecting" : "error");
             return;
           }
 
@@ -209,14 +260,16 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
         onerror(err: unknown) {
           flushPendingText();
           console.error("SSE connection error:", err);
-          setStatus("error");
+          shouldReconnectRef.current = Boolean(runIdRef.current || activePromptRef.current);
           throw err;
         },
       }).catch((err: unknown) => {
         if (err instanceof Error && err.name === "AbortError") {
           return;
         }
-        setStatus("error");
+        ctrlRef.current = null;
+        shouldReconnectRef.current = Boolean(runIdRef.current || activePromptRef.current);
+        setStatus(shouldReconnectRef.current ? "reconnecting" : "error");
       });
     },
     [closeStream, flushPendingText, queueMessage, runStorageKey, saveStoredRun, sessionId]
@@ -231,11 +284,18 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
       if (!raw) return;
 
       const stored = JSON.parse(raw) as StoredRun;
-      if (stored.status !== "running" || !stored.runId || !stored.prompt) return;
+      if (
+        (stored.status !== "running" && stored.status !== "interrupted") ||
+        !stored.runId ||
+        !stored.prompt
+      ) {
+        return;
+      }
 
       runIdRef.current = stored.runId;
       lastSeqRef.current = stored.lastSeq;
       activePromptRef.current = stored.prompt;
+      shouldReconnectRef.current = true;
       openStream(stored.prompt, true);
     } catch (err: unknown) {
       console.error("Failed to restore active run", err);
@@ -243,14 +303,40 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
   }, [openStream, runStorageKey, sessionId]);
 
   useEffect(() => {
-    if (status !== "error" || !currentPrompt) return;
+    if ((status !== "error" && status !== "reconnecting") || !shouldReconnectRef.current) return;
+    if (status === "reconnecting" && ctrlRef.current) return;
+
+    let reconnectPrompt = currentPrompt ?? activePromptRef.current;
+    if (!reconnectPrompt) {
+      try {
+        const raw = localStorage.getItem(runStorageKey);
+        if (raw) {
+          const stored = JSON.parse(raw) as StoredRun;
+          if (
+            (stored.status === "running" || stored.status === "interrupted") &&
+            stored.runId &&
+            stored.prompt
+          ) {
+            runIdRef.current = stored.runId;
+            lastSeqRef.current = stored.lastSeq;
+            activePromptRef.current = stored.prompt;
+            reconnectPrompt = stored.prompt;
+          }
+        }
+      } catch (err: unknown) {
+        console.error("Failed to load reconnect state", err);
+      }
+    }
+
+    if (!reconnectPrompt) return;
+
     const timer = setTimeout(() => {
       const next = Math.min(5, retry + 1);
       setRetry(next);
-      openStream(currentPrompt, true);
+      openStream(reconnectPrompt, true);
     }, Math.min(10_000, 800 * Math.pow(2, retry)));
     return () => clearTimeout(timer);
-  }, [status, retry, currentPrompt, openStream]);
+  }, [status, retry, currentPrompt, openStream, runStorageKey]);
 
   useEffect(
     () => () => {

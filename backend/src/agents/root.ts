@@ -2,15 +2,19 @@ import { v4 as uuid } from "uuid";
 import { SSEClient, sendMessage } from "../sse.js";
 import { buildReportFileName, runResearchGraph } from "./graph.js";
 
-export async function runRootAgent(client: SSEClient, prompt: string) {
+export async function runRootAgent(
+  client: SSEClient,
+  prompt: string,
+  options: { runId?: string; resume?: boolean } = {}
+) {
   sendMessage(client, {
     id: uuid(),
     type: "text",
     role: "system",
-    content: "启动 LangGraph 研究工作流...",
+    content: options.resume ? "Resuming LangGraph research workflow..." : "启动 LangGraph 研究工作流...",
   });
 
-  const result = await runResearchGraph(client, prompt);
+  const result = await runResearchGraph(client, prompt, options);
   if (result.aborted) {
     return;
   }

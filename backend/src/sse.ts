@@ -1,13 +1,13 @@
 import { Response } from "express";
 import { Message } from "./types";
 
-export type SSEEventName = "message" | "done" | "error";
+export type SSEEventName = "message" | "done" | "runError";
 
 export type SSEClient = {
   res?: Response;
   closed: boolean;
   abortController: AbortController;
-  emit?: (event: SSEEventName, data: Message | string) => void;
+  emit?: (event: SSEEventName, data: Message | string | Record<string, unknown>) => void;
 };
 
 type TextStreamBase = Pick<Extract<Message, { type: "text" }>, "id" | "role">;
@@ -48,13 +48,13 @@ export function sendDone(client: SSEClient) {
   client.res?.write(`event: done\ndata: "complete"\n\n`);
 }
 
-export function sendError(client: SSEClient, error: string) {
+export function sendError(client: SSEClient, error: string | Record<string, unknown>) {
   if (client.closed) return;
   if (client.emit) {
-    client.emit("error", error);
+    client.emit("runError", error);
     return;
   }
-  client.res?.write(`event: error\ndata: ${JSON.stringify(error)}\n\n`);
+  client.res?.write(`event: runError\ndata: ${JSON.stringify(error)}\n\n`);
 }
 
 export function startTextStream(client: SSEClient, base: TextStreamBase, content = "") {
