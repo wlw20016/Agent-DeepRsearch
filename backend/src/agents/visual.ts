@@ -136,7 +136,17 @@ function isTableSpec(value: any): value is TableArtifactSpec {
 function normalizeArtifact(raw: any, index: number): VisualArtifact | null {
   const type = raw?.type === "table" ? "table" : "chart";
   const title = cleanString(raw?.title);
-  const spec = raw?.spec;
+  const rawSpec = raw?.spec ?? {};
+  const spec =
+    type === "chart"
+      ? {
+          ...rawSpec,
+          chartType: rawSpec.chartType ?? rawSpec.chart_type,
+          xField: rawSpec.xField ?? rawSpec.x_field,
+          yField: rawSpec.yField ?? rawSpec.y_field,
+          seriesField: rawSpec.seriesField ?? rawSpec.series_field,
+        }
+      : rawSpec;
 
   if (!title) return null;
   if (type === "chart" && !isChartSpec(spec)) return null;
@@ -148,8 +158,128 @@ function normalizeArtifact(raw: any, index: number): VisualArtifact | null {
     title,
     description: raw?.description ? String(raw.description) : undefined,
     spec,
-    sourceIds: Array.isArray(raw?.sourceIds) ? raw.sourceIds.map(String).filter(Boolean) : [],
+    sourceIds: Array.isArray(raw?.sourceIds)
+      ? raw.sourceIds.map(String).filter(Boolean)
+      : Array.isArray(raw?.source_ids)
+        ? raw.source_ids.map(String).filter(Boolean)
+        : [],
   };
+}
+
+function normalizeComparableText(value: string) {
+  return value.toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function dimensionsMatch(candidateDimension: string, factDimension: string) {
+  const left = normalizeComparableText(candidateDimension);
+  const right = normalizeComparableText(factDimension);
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+function numericFactValue(value: VisualFact["value"]) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+
+  const normalized = value.replace(/,/g, "");
+  const match = normalized.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+
+  const number = Number(match[0]);
+  return Number.isFinite(number) ? number : null;
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function factsForCandidate(candidate: VisualCandidate, facts: VisualFact[]) {
+  const matched = facts.filter((fact) =>
+    candidate.requiredDimensions.some((dimension) => dimensionsMatch(dimension, fact.dimension))
+  );
+
+  return matched.length ? matched : facts.filter((fact) => candidate.topic.includes(fact.subject));
+}
+
+function fallbackArtifactForCandidate(
+  candidate: VisualCandidate,
+  facts: VisualFact[],
+  index: number
+): VisualArtifact | null {
+  const matchedFacts = factsForCandidate(candidate, facts)
+    .filter((fact) => fact.confidence >= 0.35)
+    .slice(0, 20);
+  if (matchedFacts.length < 2) return null;
+
+  const numericFacts = matchedFacts
+    .map((fact) => ({ fact, value: numericFactValue(fact.value) }))
+    .filter((item): item is { fact: VisualFact; value: number } => item.value !== null);
+
+  const sourceIds = uniqueStrings(matchedFacts.flatMap((fact) => fact.sourceIds));
+
+  if (candidate.artifactType === "chart" && numericFacts.length >= 2) {
+    const firstUnit = numericFacts.find((item) => item.fact.unit)?.fact.unit;
+    const chartType = candidate.chartType ?? "bar";
+    const data = numericFacts.map(({ fact, value }) => ({
+      subject: fact.subject,
+      metric: fact.metric,
+      value,
+      unit: fact.unit ?? firstUnit ?? null,
+      period: fact.period ?? null,
+      category: fact.category ?? null,
+    }));
+
+    return {
+      id: `fallback-artifact-${index + 1}`,
+      type: "chart",
+      title: candidate.topic,
+      description: candidate.reason || "根据调研过程中抽取的结构化事实自动生成。",
+      spec: {
+        chartType,
+        xField: "subject",
+        yField: "value",
+        seriesField: "metric",
+        unit: firstUnit,
+        data,
+      },
+      sourceIds,
+    };
+  }
+
+  return {
+    id: `fallback-artifact-${index + 1}`,
+    type: "table",
+    title: candidate.topic,
+    description: candidate.reason || "根据调研过程中抽取的结构化事实自动生成。",
+    spec: {
+      columns: ["对象", "指标", "值", "单位", "时间", "说明"],
+      rows: matchedFacts.map((fact) => [
+        fact.subject,
+        fact.metric,
+        fact.value ?? "-",
+        fact.unit ?? "-",
+        fact.period ?? "-",
+        fact.context || fact.category || "-",
+      ]),
+    },
+    sourceIds,
+  };
+}
+
+function fallbackVisualArtifacts(candidates: VisualCandidate[], facts: VisualFact[]) {
+  const artifacts: VisualArtifact[] = [];
+  const seenTopics = new Set<string>();
+
+  for (const candidate of candidates) {
+    if (seenTopics.has(candidate.topic)) continue;
+    const artifact = fallbackArtifactForCandidate(candidate, facts, artifacts.length);
+    if (!artifact) continue;
+
+    artifacts.push(artifact);
+    seenTopics.add(candidate.topic);
+    if (artifacts.length >= MAX_ARTIFACTS) break;
+  }
+
+  return artifacts;
 }
 
 export async function extractVisualFacts(input: {
@@ -257,8 +387,10 @@ export async function planVisualArtifacts(input: {
 
   const response = await chatOnce(messages, input.signal);
   const parsed = parseJsonObject<{ artifacts?: any[] }>(response, { artifacts: [] });
-  return (parsed.artifacts ?? [])
+  const artifacts = (parsed.artifacts ?? [])
     .map(normalizeArtifact)
     .filter((item): item is VisualArtifact => Boolean(item))
     .slice(0, MAX_ARTIFACTS);
+
+  return artifacts.length ? artifacts : fallbackVisualArtifacts(input.candidates, input.visualFacts);
 }
