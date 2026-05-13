@@ -6,9 +6,10 @@ import { chatOnce } from "../llm.js";
 import { SSEClient, endTextStream, sendMessage, startTextStream } from "../sse.js";
 import { searchKnowledgeBase } from "../tools/rag.js";
 import { tavilySearch } from "../tools/tavily.js";
-import { RetrievedSource } from "../types.js";
+import { RetrievedSource, VisualArtifact, VisualCandidate, VisualFact } from "../types.js";
 import { runInformationProcessing } from "./infoProcess.js";
 import { runReportGeneration } from "./report.js";
+import { extractVisualCandidates, extractVisualFacts, planVisualArtifacts } from "./visual.js";
 
 type ResearchTaskType = "research" | "analysis" | "synthesis";
 
@@ -54,6 +55,7 @@ type SourceEvaluation = {
 
 export type ResearchGraphResult = {
   reportMarkdown: string;
+  visualArtifacts: VisualArtifact[];
   aborted: boolean;
 };
 
@@ -98,6 +100,18 @@ const ResearchState = Annotation.Root({
   reportMarkdown: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => "",
+  }),
+  visualFacts: Annotation<VisualFact[]>({
+    reducer: (current, update) => [...current, ...update],
+    default: () => [],
+  }),
+  visualCandidates: Annotation<VisualCandidate[]>({
+    reducer: (_current, update) => update,
+    default: () => [],
+  }),
+  visualArtifacts: Annotation<VisualArtifact[]>({
+    reducer: (_current, update) => update,
+    default: () => [],
   }),
   aborted: Annotation<boolean>({
     reducer: (_current, update) => update,
@@ -630,6 +644,13 @@ export async function runResearchGraph(
         sourceIds,
         evaluationSummary: state.sourceEvaluation?.summary ?? "No source evaluation available.",
       };
+      const visualFacts = await extractVisualFacts({
+        task,
+        insight: process.insights,
+        sources: state.sources,
+        sourceEvaluation: state.sourceEvaluation,
+        signal: client.abortController.signal,
+      });
 
       const preview =
         process.insights.replace(/\s+/g, " ").trim().slice(0, 180) ||
@@ -640,12 +661,14 @@ export async function runResearchGraph(
         nextTaskIndex: state.currentTaskIndex + 1,
         insightLength: process.insights.length,
         sourceIds,
+        visualFactCount: visualFacts.length,
         preview,
       });
 
       return {
         taskResults: [taskResult],
         allSources: state.sources,
+        visualFacts,
         currentTaskIndex: state.currentTaskIndex + 1,
       };
     })
@@ -665,6 +688,50 @@ export async function runResearchGraph(
       });
       return { reportMarkdown: report.markdown };
     })
+    .addNode("extractVisualCandidates", async (state: ResearchStateValue) => {
+      emitNodeStart(
+        client,
+        "extractVisualCandidates",
+        "Identify report sections that can be improved with charts or tables."
+      );
+      const visualCandidates = await extractVisualCandidates({
+        prompt: state.prompt,
+        reportMarkdown: state.reportMarkdown,
+        visualFacts: state.visualFacts,
+        sourceEvaluation: state.sourceEvaluation,
+        signal: client.abortController.signal,
+      });
+      emitNodeDone(client, "extractVisualCandidates", {
+        visualFacts: state.visualFacts.length,
+        candidates: visualCandidates.length,
+        topics: visualCandidates.map((candidate) => candidate.topic),
+      });
+      return { visualCandidates };
+    })
+    .addNode("visualPlanner", async (state: ResearchStateValue) => {
+      emitNodeStart(client, "visualPlanner", "Build renderable chart and table artifacts.");
+      const visualArtifacts = await planVisualArtifacts({
+        candidates: state.visualCandidates,
+        visualFacts: state.visualFacts,
+        signal: client.abortController.signal,
+      });
+
+      for (const artifact of visualArtifacts) {
+        sendMessage(client, {
+          id: uuid(),
+          type: "artifact",
+          role: "agent",
+          content: artifact.title,
+          meta: { artifact },
+        });
+      }
+
+      emitNodeDone(client, "visualPlanner", {
+        artifacts: visualArtifacts.length,
+        titles: visualArtifacts.map((artifact) => artifact.title),
+      });
+      return { visualArtifacts };
+    })
     .addEdge(START, "planner")
     .addEdge("planner", "approval")
     .addConditionalEdges(
@@ -683,7 +750,9 @@ export async function runResearchGraph(
     .addEdge("retrieveEvidence", "sourceEvaluator")
     .addEdge("sourceEvaluator", "process")
     .addEdge("process", "selectTask")
-    .addEdge("report", END)
+    .addEdge("report", "extractVisualCandidates")
+    .addEdge("extractVisualCandidates", "visualPlanner")
+    .addEdge("visualPlanner", END)
     .compile({ checkpointer: langgraphCheckpointer });
 
   const config = {
@@ -696,6 +765,7 @@ export async function runResearchGraph(
   const result = await graph.invoke(options.resume ? null : { prompt }, config);
   return {
     reportMarkdown: result.reportMarkdown,
+    visualArtifacts: result.visualArtifacts,
     aborted: result.aborted,
   };
 }

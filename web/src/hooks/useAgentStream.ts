@@ -296,7 +296,7 @@ export function useAgentStream({ sessionId, onMessage, onDone }: Props) {
       lastSeqRef.current = stored.lastSeq;
       activePromptRef.current = stored.prompt;
       shouldReconnectRef.current = true;
-      openStream(stored.prompt, true);
+      queueMicrotask(() => openStream(stored.prompt, true));
     } catch (err: unknown) {
       console.error("Failed to restore active run", err);
     }

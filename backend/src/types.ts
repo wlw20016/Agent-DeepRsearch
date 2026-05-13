@@ -50,6 +50,15 @@ export type Message =
     }
   | {
       id: string;
+      type: "artifact";
+      role: "agent";
+      content: string;
+      meta: {
+        artifact: VisualArtifact;
+      };
+    }
+  | {
+      id: string;
       type: "humanInput";
       role: "agent";
       content: string;
@@ -80,4 +89,51 @@ export type ResearchContext = {
 export type TavilyResult = RetrievedSource & {
   sourceType: "web";
   url: string;
+};
+
+export type VisualFact = {
+  id: string;
+  taskId: string;
+  subject: string;
+  metric: string;
+  value?: number | string;
+  unit?: string;
+  category?: string;
+  period?: string;
+  dimension: string;
+  sourceIds: string[];
+  confidence: number;
+  context: string;
+};
+
+export type VisualCandidate = {
+  id: string;
+  topic: string;
+  artifactType: "chart" | "table";
+  chartType?: "bar" | "line" | "pie" | "scatter";
+  requiredDimensions: string[];
+  reason: string;
+};
+
+export type ChartArtifactSpec = {
+  chartType: "bar" | "line" | "pie" | "scatter";
+  xField?: string;
+  yField?: string;
+  seriesField?: string;
+  unit?: string;
+  data: Array<Record<string, string | number | null>>;
+};
+
+export type TableArtifactSpec = {
+  columns: string[];
+  rows: Array<Array<string | number | null>>;
+};
+
+export type VisualArtifact = {
+  id: string;
+  type: "chart" | "table";
+  title: string;
+  description?: string;
+  spec: ChartArtifactSpec | TableArtifactSpec;
+  sourceIds: string[];
 };
