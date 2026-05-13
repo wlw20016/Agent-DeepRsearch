@@ -1,6 +1,6 @@
 import React from "react";
 import { Button, List, Space, Typography } from "antd";
-import { PlusOutlined } from "@ant-design/icons";
+import { CloseOutlined, PlusOutlined } from "@ant-design/icons";
 import type { Session } from "../types/messages";
 
 type Props = {
@@ -8,9 +8,16 @@ type Props = {
   activeId: string;
   onCreate: () => void;
   onSelect: (id: string) => void;
+  onClose: (id: string) => void;
 };
 
-export const SessionList: React.FC<Props> = ({ sessions, activeId, onCreate, onSelect }) => {
+export const SessionList: React.FC<Props> = ({
+  sessions,
+  activeId,
+  onCreate,
+  onSelect,
+  onClose,
+}) => {
   return (
     <div className="session-list">
       <Space style={{ marginBottom: 12 }}>
@@ -24,15 +31,29 @@ export const SessionList: React.FC<Props> = ({ sessions, activeId, onCreate, onS
       <List
         size="small"
         dataSource={sessions}
-        renderItem={(s) => (
+        renderItem={(session) => (
           <List.Item
-            className={`session-item ${s.id === activeId ? "active" : ""}`}
-            onClick={() => onSelect(s.id)}
+            className={`session-item ${session.id === activeId ? "active" : ""}`}
+            onClick={() => onSelect(session.id)}
           >
-            <div className="session-title">{s.title || "未命名会话"}</div>
-            <div className="session-time">
-              {new Date(s.createdAt).toLocaleString("zh-CN", { hour12: false })}
+            <div className="session-main">
+              <div className="session-title">{session.title || "未命名会话"}</div>
+              <div className="session-time">
+                {new Date(session.createdAt).toLocaleString("zh-CN", { hour12: false })}
+              </div>
             </div>
+            <Button
+              type="text"
+              size="small"
+              className="session-close"
+              icon={<CloseOutlined />}
+              aria-label="关闭会话"
+              title="关闭会话"
+              onClick={(event) => {
+                event.stopPropagation();
+                onClose(session.id);
+              }}
+            />
           </List.Item>
         )}
       />

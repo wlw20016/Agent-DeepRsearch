@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Badge, Layout, Space, Tag, Typography, message as antdMessage } from "antd";
+import { DownOutlined } from "@ant-design/icons";
 import { v4 as uuid } from "uuid";
 import { ChatInput } from "./components/ChatInput";
 import {
@@ -713,6 +714,36 @@ export default function App() {
       });
   };
 
+  const closeSession = useCallback(
+    (id: string) => {
+      if (id === activeSession?.id) {
+        closeStream("idle");
+      }
+
+      setSessions((prev) => {
+        const nextSessions = prev.filter((session) => session.id !== id);
+
+        if (!nextSessions.length) {
+          const session: Session = {
+            id: uuid(),
+            title: LABEL_NEW_SESSION,
+            createdAt: Date.now(),
+            messages: [],
+          };
+          setActiveId(session.id);
+          return [session];
+        }
+
+        if (id === activeSession?.id) {
+          setActiveId(nextSessions[0].id);
+        }
+
+        return nextSessions;
+      });
+    },
+    [activeSession?.id, closeStream]
+  );
+
   const setTitleFromPrompt = useCallback((prompt: string) => {
     const sessionId = activeSession?.id;
     const title = prompt.slice(0, 24) || LABEL_NEW_SESSION;
@@ -790,6 +821,7 @@ export default function App() {
             closeStream("idle");
             setActiveId(id);
           }}
+          onClose={closeSession}
         />
       </Sider>
 
@@ -848,7 +880,7 @@ export default function App() {
                     scrollToBottom("smooth");
                   }}
                 >
-                  →
+                  <DownOutlined />
                 </button>
               )}
             </div>

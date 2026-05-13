@@ -7,6 +7,7 @@ import { SubAgentCallMessage } from "./messages/SubAgentCallMessage";
 import { ToolCallMessage } from "./messages/ToolCallMessage";
 import { ToolResultMessage } from "./messages/ToolResultMessage";
 import { AttachmentMessage } from "./messages/AttachmentMessage";
+import { ArtifactMessage } from "./messages/ArtifactMessage";
 import { HumanInputMessage } from "./messages/HumanInputMessage";
 
 type Props = {
@@ -33,6 +34,8 @@ const MessageRendererComponent: React.FC<Props> = ({ message, onResend, onRetry,
         return <ToolResultMessage message={message} />;
       case "attachment":
         return <AttachmentMessage message={message} />;
+      case "artifact":
+        return <ArtifactMessage message={message} />;
       case "humanInput":
         return <HumanInputMessage message={message} onDecision={onDecision} />;
       default:

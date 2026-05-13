@@ -1,17 +1,33 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { v4 as uuid } from "uuid";
 import { createApproval } from "../approval.js";
+import { langgraphCheckpointer } from "../langgraphSqliteSaver.js";
 import { chatOnce } from "../llm.js";
 import { SSEClient, endTextStream, sendMessage, startTextStream } from "../sse.js";
 import { searchKnowledgeBase } from "../tools/rag.js";
 import { tavilySearch } from "../tools/tavily.js";
-import { RetrievedSource } from "../types.js";
+import { RetrievedSource, VisualArtifact, VisualCandidate, VisualFact } from "../types.js";
 import { runInformationProcessing } from "./infoProcess.js";
 import { runReportGeneration } from "./report.js";
+import { extractVisualCandidates, extractVisualFacts, planVisualArtifacts } from "./visual.js";
 
-type PlanStep = {
+type ResearchTaskType = "research" | "analysis" | "synthesis";
+
+type ResearchTask = {
+  id: string;
   title: string;
   detail: string;
+  type: ResearchTaskType;
+  query: string;
+  acceptanceCriteria: string[];
+};
+
+type TaskResult = {
+  taskId: string;
+  title: string;
+  insight: string;
+  sourceIds: string[];
+  evaluationSummary: string;
 };
 
 type SourceAssessment = {
@@ -39,16 +55,23 @@ type SourceEvaluation = {
 
 export type ResearchGraphResult = {
   reportMarkdown: string;
+  visualArtifacts: VisualArtifact[];
   aborted: boolean;
 };
 
 const FALLBACK_REPORT_NAME = "research-summary";
+const MAX_PLAN_TASKS = 5;
+const GRAPH_RECURSION_LIMIT = 80;
 
 const ResearchState = Annotation.Root({
   prompt: Annotation<string>(),
-  plan: Annotation<PlanStep[]>({
+  tasks: Annotation<ResearchTask[]>({
     reducer: (_current, update) => update,
     default: () => [],
+  }),
+  currentTaskIndex: Annotation<number>({
+    reducer: (_current, update) => update,
+    default: () => 0,
   }),
   kbSources: Annotation<RetrievedSource[]>({
     reducer: (_current, update) => update,
@@ -62,17 +85,33 @@ const ResearchState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => [],
   }),
+  allSources: Annotation<RetrievedSource[]>({
+    reducer: (current, update) => [...current, ...update],
+    default: () => [],
+  }),
   sourceEvaluation: Annotation<SourceEvaluation | null>({
     reducer: (_current, update) => update,
     default: () => null,
   }),
-  insights: Annotation<string>({
-    reducer: (_current, update) => update,
-    default: () => "",
+  taskResults: Annotation<TaskResult[]>({
+    reducer: (current, update) => [...current, ...update],
+    default: () => [],
   }),
   reportMarkdown: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => "",
+  }),
+  visualFacts: Annotation<VisualFact[]>({
+    reducer: (current, update) => [...current, ...update],
+    default: () => [],
+  }),
+  visualCandidates: Annotation<VisualCandidate[]>({
+    reducer: (_current, update) => update,
+    default: () => [],
+  }),
+  visualArtifacts: Annotation<VisualArtifact[]>({
+    reducer: (_current, update) => update,
+    default: () => [],
   }),
   aborted: Annotation<boolean>({
     reducer: (_current, update) => update,
@@ -89,12 +128,74 @@ export function buildReportFileName(prompt: string) {
   return `${safe}.md`;
 }
 
-async function buildPlan(prompt: string): Promise<PlanStep[]> {
+function fallbackTasks(prompt: string): ResearchTask[] {
+  return [
+    {
+      id: "task-1",
+      title: "Clarify scope and background",
+      detail: "Identify the core question, background context, and relevant constraints.",
+      type: "research",
+      query: prompt,
+      acceptanceCriteria: ["The task scope is clear", "Important background facts are collected"],
+    },
+    {
+      id: "task-2",
+      title: "Collect and verify evidence",
+      detail: "Search for supporting sources and compare evidence quality.",
+      type: "research",
+      query: `${prompt} evidence sources data`,
+      acceptanceCriteria: ["Multiple independent sources are available", "Weak sources are flagged"],
+    },
+    {
+      id: "task-3",
+      title: "Synthesize conclusions",
+      detail: "Turn verified evidence into actionable findings for the final report.",
+      type: "synthesis",
+      query: `${prompt} analysis conclusions recommendations`,
+      acceptanceCriteria: ["Key findings are explicit", "Remaining uncertainty is stated"],
+    },
+  ];
+}
+
+function normalizeTask(raw: any, index: number, prompt: string): ResearchTask {
+  const title = String(raw?.title || raw?.name || `Task ${index + 1}`);
+  const detail = String(raw?.detail || raw?.description || "");
+  const type = ["research", "analysis", "synthesis"].includes(raw?.type)
+    ? raw.type
+    : index === 0
+      ? "research"
+      : index === 1
+        ? "analysis"
+        : "synthesis";
+
+  const criteria = Array.isArray(raw?.acceptanceCriteria)
+    ? raw.acceptanceCriteria.map(String).filter(Boolean)
+    : Array.isArray(raw?.acceptance_criteria)
+      ? raw.acceptance_criteria.map(String).filter(Boolean)
+      : [];
+
+  return {
+    id: String(raw?.id || `task-${index + 1}`),
+    title,
+    detail,
+    type,
+    query: String(raw?.query || `${prompt} ${title} ${detail}`.trim()),
+    acceptanceCriteria: criteria.length ? criteria : ["Task output is useful for final report"],
+  };
+}
+
+async function buildTasks(prompt: string): Promise<ResearchTask[]> {
   const response = await chatOnce([
     {
       role: "system",
-      content:
-        "You are a planning agent. Split the research task into 3-5 executable steps. Return a JSON array with title and detail fields.",
+      content: [
+        "You are a Plan & Execute planner.",
+        "Create a concrete execution checklist for a research agent.",
+        "Return only a JSON array. Each item must include:",
+        "id, title, detail, type, query, acceptanceCriteria.",
+        "type must be one of: research, analysis, synthesis.",
+        "Each query should be directly usable by retrieval nodes.",
+      ].join("\n"),
     } as any,
     { role: "human", content: prompt } as any,
   ]);
@@ -104,23 +205,14 @@ async function buildPlan(prompt: string): Promise<PlanStep[]> {
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
       if (Array.isArray(parsed) && parsed.length) {
-        return parsed.map((item) => ({
-          title: item.title ?? "Step",
-          detail: item.detail ?? "",
-        }));
+        return parsed.slice(0, MAX_PLAN_TASKS).map((item, index) => normalizeTask(item, index, prompt));
       }
     }
   } catch {
-    /* ignore invalid JSON and fall back */
+    /* fall through to deterministic fallback */
   }
 
-  return [
-    { title: "Understand the task", detail: "Clarify intent, scope, and deliverable." },
-    { title: "Retrieve evidence", detail: "Search local knowledge and web sources in parallel." },
-    { title: "Evaluate sources", detail: "Deduplicate, score, rank, and flag source risks." },
-    { title: "Synthesize findings", detail: "Cross-check evidence and extract key insights." },
-    { title: "Generate report", detail: "Produce a sourced Markdown research report." },
-  ];
+  return fallbackTasks(prompt);
 }
 
 async function maybeRequestApproval(client: SSEClient, reason: string): Promise<boolean> {
@@ -182,6 +274,10 @@ function emitToolResult(client: SSEClient, tool: string, result: unknown) {
 function shouldRequestApproval(prompt: string) {
   const lower = prompt.toLowerCase();
   return lower.includes("成本") || lower.includes("支付") || lower.includes("cost");
+}
+
+function currentTask(state: ResearchStateValue) {
+  return state.tasks[state.currentTaskIndex];
 }
 
 function normalizeText(value: string) {
@@ -289,19 +385,21 @@ function detectConflicts(sources: RetrievedSource[]) {
   return conflicts.slice(0, 6);
 }
 
-function evaluateSources(kbSources: RetrievedSource[], webSources: RetrievedSource[]) {
-  const input = [...kbSources, ...webSources];
+function dedupeSources(sources: RetrievedSource[]) {
   const deduped = new Map<string, RetrievedSource>();
-
-  for (const source of input) {
+  for (const source of sources) {
     const key = sourceKey(source);
     const existing = deduped.get(key);
     if (!existing || (source.score ?? 0) > (existing.score ?? 0)) {
       deduped.set(key, source);
     }
   }
+  return Array.from(deduped.values());
+}
 
-  const sources = Array.from(deduped.values());
+function evaluateSources(kbSources: RetrievedSource[], webSources: RetrievedSource[]) {
+  const input = [...kbSources, ...webSources];
+  const sources = dedupeSources(input);
   const assessments = sources
     .map(scoreSource)
     .sort((left, right) => right.reliabilityScore - left.reliabilityScore)
@@ -352,48 +450,85 @@ function evaluateSources(kbSources: RetrievedSource[], webSources: RetrievedSour
   return { sources: rankedSources, evaluation };
 }
 
-function buildProcessingPrompt(prompt: string, evaluation: SourceEvaluation | null) {
-  if (!evaluation) return prompt;
-
-  const assessmentText = evaluation.assessments
-    .slice(0, 10)
-    .map(
-      (item) =>
-        `- ${item.sourceId}: score=${item.reliabilityScore}, priority=${item.citationPriority}, reasons=${item.reasons.join("; ")}`
-    )
-    .join("\n");
+function buildTaskProcessingPrompt(
+  rootPrompt: string,
+  task: ResearchTask,
+  evaluation: SourceEvaluation | null
+) {
+  const evaluationText = evaluation
+    ? [
+        evaluation.summary,
+        `Citation candidate IDs: ${evaluation.citationCandidateIds.join(", ") || "none"}`,
+        `Potential conflicts: ${evaluation.conflicts.join(" | ") || "none"}`,
+        `Evidence gaps: ${evaluation.gaps.join(" | ") || "none"}`,
+      ].join("\n")
+    : "No source evaluation available.";
 
   return [
-    prompt,
+    `Root user request: ${rootPrompt}`,
+    "",
+    `Current checklist item: ${task.title}`,
+    `Task type: ${task.type}`,
+    `Task detail: ${task.detail}`,
+    `Acceptance criteria: ${task.acceptanceCriteria.join("; ")}`,
+    "",
+    "Use the retrieved sources to complete only this checklist item.",
+    "Return concise findings that can be merged into the final report.",
     "",
     "Source evaluation context:",
-    evaluation.summary,
-    `Citation candidate IDs: ${evaluation.citationCandidateIds.join(", ") || "none"}`,
-    `Potential conflicts: ${evaluation.conflicts.join(" | ") || "none"}`,
-    `Evidence gaps: ${evaluation.gaps.join(" | ") || "none"}`,
-    "Source assessments:",
-    assessmentText || "- none",
+    evaluationText,
+  ].join("\n");
+}
+
+function buildFinalReportPrompt(state: ResearchStateValue) {
+  const checklist = state.tasks
+    .map((task, index) => {
+      const result = state.taskResults.find((item) => item.taskId === task.id);
+      return [
+        `${index + 1}. ${task.title}`,
+        `Detail: ${task.detail}`,
+        `Acceptance: ${task.acceptanceCriteria.join("; ")}`,
+        `Status: ${result ? "completed" : "not completed"}`,
+        result ? `Result summary: ${result.insight.slice(0, 1200)}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n\n");
+
+  return [
+    state.prompt,
+    "",
+    "Plan & Execute checklist results:",
+    checklist,
+    "",
+    "Write the final report by synthesizing the completed checklist items.",
+    "Preserve uncertainty and evidence gaps when sources were weak.",
   ].join("\n");
 }
 
 export async function runResearchGraph(
   client: SSEClient,
-  prompt: string
+  prompt: string,
+  options: { runId?: string; resume?: boolean } = {}
 ): Promise<ResearchGraphResult> {
   const graph = new StateGraph(ResearchState)
     .addNode("planner", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "planner", "Create an executable research plan.");
-      const plan = await buildPlan(state.prompt);
-      const planText = plan
-        .map((step, index) => `${index + 1}. ${step.title} - ${step.detail}`)
+      emitNodeStart(client, "planner", "Create an executable task checklist.");
+      const tasks = await buildTasks(state.prompt);
+      const planText = tasks
+        .map(
+          (task, index) =>
+            `${index + 1}. [${task.type}] ${task.title}\n   ${task.detail}\n   Query: ${task.query}`
+        )
         .join("\n");
       const planMessage = { id: uuid(), role: "agent" as const };
 
-      startTextStream(client, planMessage, `Execution plan:\n${planText}`);
+      startTextStream(client, planMessage, `Execution checklist:\n${planText}`);
       endTextStream(client, planMessage);
-      emitNodeDone(client, "planner", { steps: plan.length });
+      emitNodeDone(client, "planner", { tasks });
 
-      return { plan };
+      return { tasks, currentTaskIndex: 0 };
     })
     .addNode("approval", async (state: ResearchStateValue) => {
       emitNodeStart(client, "approval", "Check whether human approval is required.");
@@ -419,32 +554,64 @@ export async function runResearchGraph(
 
       return { aborted: !approved };
     })
-    .addNode("kbRetriever", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "kbRetriever", "Search local knowledge base.");
-      emitToolCall(client, "knowledge_base_search", state.prompt);
-      const kbSources = await searchKnowledgeBase(state.prompt);
+    .addNode("selectTask", async (state: ResearchStateValue) => {
+      const task = currentTask(state);
+      if (!task) {
+        emitNodeDone(client, "selectTask", {
+          status: "all_tasks_complete",
+          completed: state.taskResults.length,
+        });
+        return {};
+      }
+
+      emitNodeStart(
+        client,
+        "selectTask",
+        `Execute checklist item ${state.currentTaskIndex + 1}/${state.tasks.length}: ${task.title}`
+      );
+      emitNodeDone(client, "selectTask", {
+        taskId: task.id,
+        title: task.title,
+        type: task.type,
+        query: task.query,
+        acceptanceCriteria: task.acceptanceCriteria,
+      });
+      return {};
+    })
+    // 做双路并行检索
+    .addNode("retrieveEvidence", async (state: ResearchStateValue) => {
+      const task = currentTask(state);
+      const query = task?.query ?? state.prompt;
+      emitNodeStart(client, "retrieveEvidence", `Retrieve evidence for: ${task?.title ?? "task"}`);
+      emitToolCall(client, "hybrid_retrieval", { taskId: task?.id, query });
+      const [kbSources, webSources] = await Promise.all([
+        searchKnowledgeBase(query),
+        tavilySearch(query),
+      ]);
       emitToolResult(client, "knowledge_base_search", {
+        taskId: task?.id,
         total: kbSources.length,
         items: kbSources,
       });
-      emitNodeDone(client, "kbRetriever", { sources: kbSources.length });
-      return { kbSources };
-    })
-    .addNode("webRetriever", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "webRetriever", "Search web evidence.");
-      emitToolCall(client, "tavily_search", state.prompt);
-      const webSources = await tavilySearch(state.prompt);
       emitToolResult(client, "tavily_search", {
+        taskId: task?.id,
         total: webSources.length,
         items: webSources,
       });
-      emitNodeDone(client, "webRetriever", { sources: webSources.length });
-      return { webSources };
+      emitNodeDone(client, "retrieveEvidence", {
+        taskId: task?.id,
+        knowledgeBase: kbSources.length,
+        web: webSources.length,
+      });
+      return { kbSources, webSources };
     })
+    // 评估消息源
     .addNode("sourceEvaluator", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "sourceEvaluator", "Score, deduplicate, and audit sources.");
+      const task = currentTask(state);
+      emitNodeStart(client, "sourceEvaluator", `Evaluate sources for: ${task?.title ?? "task"}`);
       const { sources, evaluation } = evaluateSources(state.kbSources, state.webSources);
       emitNodeDone(client, "sourceEvaluator", {
+        taskId: task?.id,
         totalInput: evaluation.totalInput,
         totalDeduped: evaluation.totalDeduped,
         duplicateCount: evaluation.duplicateCount,
@@ -457,40 +624,148 @@ export async function runResearchGraph(
       return { sources, sourceEvaluation: evaluation };
     })
     .addNode("process", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "process", "Synthesize evidence into findings.");
-      const processingPrompt = buildProcessingPrompt(state.prompt, state.sourceEvaluation);
-      const process = await runInformationProcessing(client, processingPrompt, state.sources);
-      emitNodeDone(client, "process", { insightLength: process.insights.length });
-      return { insights: process.insights };
+      const task = currentTask(state);
+      if (!task) return {};
+
+      emitNodeStart(client, "process", `Complete checklist item: ${task.title}`);
+      const processingPrompt = buildTaskProcessingPrompt(
+        state.prompt,
+        task,
+        state.sourceEvaluation
+      );
+      const process = await runInformationProcessing(client, processingPrompt, state.sources, {
+        streamToUser: false,
+      });
+      const sourceIds = state.sources.map((source) => source.id);
+      const taskResult: TaskResult = {
+        taskId: task.id,
+        title: task.title,
+        insight: process.insights,
+        sourceIds,
+        evaluationSummary: state.sourceEvaluation?.summary ?? "No source evaluation available.",
+      };
+      const visualFacts = await extractVisualFacts({
+        task,
+        insight: process.insights,
+        sources: state.sources,
+        sourceEvaluation: state.sourceEvaluation,
+        signal: client.abortController.signal,
+      });
+
+      const preview =
+        process.insights.replace(/\s+/g, " ").trim().slice(0, 180) ||
+        "Checklist item completed.";
+
+      emitNodeDone(client, "process", {
+        taskId: task.id,
+        nextTaskIndex: state.currentTaskIndex + 1,
+        insightLength: process.insights.length,
+        sourceIds,
+        visualFactCount: visualFacts.length,
+        preview,
+      });
+
+      return {
+        taskResults: [taskResult],
+        allSources: state.sources,
+        visualFacts,
+        currentTaskIndex: state.currentTaskIndex + 1,
+      };
     })
     .addNode("report", async (state: ResearchStateValue) => {
-      emitNodeStart(client, "report", "Generate the final Markdown report.");
+      emitNodeStart(client, "report", "Generate final report from completed checklist.");
+      const finalSources = dedupeSources(state.allSources);
       const report = await runReportGeneration(
         client,
-        buildProcessingPrompt(state.prompt, state.sourceEvaluation),
-        state.insights,
-        state.sources
+        buildFinalReportPrompt(state),
+        state.taskResults.map((item) => `## ${item.title}\n${item.insight}`).join("\n\n"),
+        finalSources
       );
-      emitNodeDone(client, "report", { markdownLength: report.markdown.length });
+      emitNodeDone(client, "report", {
+        markdownLength: report.markdown.length,
+        tasksCompleted: state.taskResults.length,
+        sources: finalSources.length,
+      });
       return { reportMarkdown: report.markdown };
+    })
+    .addNode("extractVisualCandidates", async (state: ResearchStateValue) => {
+      emitNodeStart(
+        client,
+        "extractVisualCandidates",
+        "Identify report sections that can be improved with charts or tables."
+      );
+      const visualCandidates = await extractVisualCandidates({
+        prompt: state.prompt,
+        reportMarkdown: state.reportMarkdown,
+        visualFacts: state.visualFacts,
+        sourceEvaluation: state.sourceEvaluation,
+        signal: client.abortController.signal,
+      });
+      emitNodeDone(client, "extractVisualCandidates", {
+        visualFacts: state.visualFacts.length,
+        candidates: visualCandidates.length,
+        topics: visualCandidates.map((candidate) => candidate.topic),
+      });
+      return { visualCandidates };
+    })
+    .addNode("visualPlanner", async (state: ResearchStateValue) => {
+      emitNodeStart(client, "visualPlanner", "Build renderable chart and table artifacts.");
+      const visualArtifacts = await planVisualArtifacts({
+        candidates: state.visualCandidates,
+        visualFacts: state.visualFacts,
+        signal: client.abortController.signal,
+      });
+
+      for (const artifact of visualArtifacts) {
+        sendMessage(client, {
+          id: uuid(),
+          type: "artifact",
+          role: "agent",
+          content: artifact.title,
+          meta: { artifact },
+        });
+      }
+
+      emitNodeDone(client, "visualPlanner", {
+        artifacts: visualArtifacts.length,
+        titles: visualArtifacts.map((artifact) => artifact.title),
+      });
+      return { visualArtifacts };
     })
     .addEdge(START, "planner")
     .addEdge("planner", "approval")
     .addConditionalEdges(
       "approval",
-      (state: ResearchStateValue) =>
-        state.aborted ? END : ["kbRetriever", "webRetriever"],
-      { kbRetriever: "kbRetriever", webRetriever: "webRetriever", [END]: END } as any
+      (state: ResearchStateValue) => (state.aborted ? END : "selectTask"),
+      { selectTask: "selectTask", [END]: END } as any
     )
-    .addEdge(["kbRetriever", "webRetriever"], "sourceEvaluator")
+    .addConditionalEdges(
+      "selectTask",
+      (state: ResearchStateValue) =>
+        state.currentTaskIndex >= state.tasks.length
+          ? "report"
+          : "retrieveEvidence",
+      { retrieveEvidence: "retrieveEvidence", report: "report" } as any
+    )
+    .addEdge("retrieveEvidence", "sourceEvaluator")
     .addEdge("sourceEvaluator", "process")
-    .addEdge("process", "report")
-    .addEdge("report", END)
-    .compile();
+    .addEdge("process", "selectTask")
+    .addEdge("report", "extractVisualCandidates")
+    .addEdge("extractVisualCandidates", "visualPlanner")
+    .addEdge("visualPlanner", END)
+    .compile({ checkpointer: langgraphCheckpointer });
 
-  const result = await graph.invoke({ prompt });
+  const config = {
+    configurable: {
+      thread_id: options.runId ?? "default-research-thread",
+    },
+    durability: "sync" as const,
+    recursionLimit: GRAPH_RECURSION_LIMIT,
+  };
+  const result = await graph.invoke(options.resume ? null : { prompt }, config);
   return {
     reportMarkdown: result.reportMarkdown,
+    visualArtifacts: result.visualArtifacts,
     aborted: result.aborted,
   };
 }

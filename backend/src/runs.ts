@@ -8,12 +8,12 @@ import { appendSessionMessage } from "./sessions.js";
 import { SSEClient, SSEEventName, sendDone, sendError } from "./sse.js";
 import { Message } from "./types.js";
 
-export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 export type RunEvent = {
   seq: number;
   event: SSEEventName;
-  data: Message | string;
+  data: Message | string | Record<string, unknown>;
   createdAt: number;
 };
 
@@ -80,8 +80,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_events(run_id, seq);
 
   UPDATE research_runs
-  SET status = 'failed',
-      completed_at = COALESCE(completed_at, unixepoch('now') * 1000),
+  SET status = 'interrupted',
       error = COALESCE(error, 'server restarted before run completed')
   WHERE status = 'running';
 `);
@@ -149,12 +148,23 @@ function listRunEvents(runId: string, since = 0): RunEvent[] {
   return (listEventsStmt.all(runId, since) as EventRow[]).map((row) => ({
     seq: row.seq,
     event: row.event,
-    data: JSON.parse(row.data) as Message | string,
+    data: JSON.parse(row.data) as Message | string | Record<string, unknown>,
     createdAt: row.created_at,
   }));
 }
 
-function appendRunEvent(run: ResearchRun, event: SSEEventName, data: Message | string) {
+function isMessagePayload(data: Message | string | Record<string, unknown>): data is Message {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    typeof (data as Message).id === "string" &&
+    typeof (data as Message).type === "string" &&
+    typeof (data as Message).role === "string" &&
+    typeof (data as Message).content === "string"
+  );
+}
+
+function appendRunEvent(run: ResearchRun, event: SSEEventName, data: Message | string | Record<string, unknown>) {
   const item: RunEvent = {
     seq: run.nextSeq++,
     event,
@@ -165,7 +175,7 @@ function appendRunEvent(run: ResearchRun, event: SSEEventName, data: Message | s
   insertEventStmt.run(run.id, item.seq, item.event, JSON.stringify(item.data), item.createdAt);
   updateNextSeqStmt.run(run.nextSeq, run.id);
 
-  if (event === "message" && typeof data !== "string") {
+  if (event === "message" && isMessagePayload(data)) {
     appendSessionMessage(run.sessionId, data);
   }
 
@@ -182,11 +192,50 @@ function createRunClient(run: ResearchRun): SSEClient {
   };
 }
 
-async function executeRun(run: ResearchRun) {
+function isRecoverableRunError(error: unknown) {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      error.name === "AbortError" ||
+      message.includes("timeout") ||
+      message.includes("timed out") ||
+      message.includes("network") ||
+      message.includes("connection") ||
+      message.includes("fetch failed") ||
+      message.includes("socket") ||
+      message.includes("econnreset") ||
+      message.includes("econnrefused") ||
+      message.includes("econnaborted") ||
+      message.includes("etimedout") ||
+      message.includes("enotfound") ||
+      message.includes("enetunreach") ||
+      message.includes("eai_again") ||
+      message.includes("und_err") ||
+      message.includes("rate limit") ||
+      message.includes("429") ||
+      message.includes("502") ||
+      message.includes("503") ||
+      message.includes("504") ||
+      message.includes("gateway") ||
+      message.includes("service unavailable") ||
+      message.includes("aborted") ||
+      message.includes("terminated")
+    );
+  }
+
+  return false;
+}
+
+async function executeRun(run: ResearchRun, options: { resume?: boolean } = {}) {
   const client = createRunClient(run);
 
   try {
-    await runRootAgent(client, run.prompt);
+    run.status = "running";
+    run.completedAt = undefined;
+    run.error = undefined;
+    persistRunStatus(run);
+
+    await runRootAgent(client, run.prompt, { runId: run.id, resume: options.resume });
     if (run.status === "running") {
       run.status = "completed";
       run.completedAt = Date.now();
@@ -203,12 +252,18 @@ async function executeRun(run: ResearchRun) {
     }
 
     const errorMessage = error instanceof Error ? error.message : "unknown server error";
-    run.status = "failed";
+    const recoverable = isRecoverableRunError(error);
+    run.status = recoverable ? "interrupted" : "failed";
     run.error = errorMessage;
-    run.completedAt = Date.now();
+    run.completedAt = recoverable ? undefined : Date.now();
     persistRunStatus(run);
     console.error(error);
-    sendError(client, errorMessage);
+    sendError(client, {
+      message: errorMessage,
+      recoverable,
+      status: run.status,
+      runId: run.id,
+    });
   }
 }
 
@@ -227,6 +282,14 @@ export function createResearchRun(sessionId: string, prompt: string) {
   persistRun(run);
   activeRuns.set(run.id, run);
   void executeRun(run);
+  return run;
+}
+
+export function resumeResearchRun(run: ResearchRun) {
+  if (run.status !== "interrupted") return run;
+
+  activeRuns.set(run.id, run);
+  void executeRun(run, { resume: true });
   return run;
 }
 
@@ -266,7 +329,7 @@ export function subscribeToRun(run: ResearchRun, res: Response, since = 0) {
 
 export function cancelResearchRun(runId: string) {
   const run = getResearchRun(runId);
-  if (!run || run.status !== "running") return run;
+  if (!run || (run.status !== "running" && run.status !== "interrupted")) return run;
 
   run.status = "cancelled";
   run.completedAt = Date.now();

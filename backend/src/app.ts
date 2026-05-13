@@ -19,6 +19,7 @@ import {
   cancelResearchRun,
   createResearchRun,
   getResearchRun,
+  resumeResearchRun,
   subscribeToRun,
 } from "./runs.js";
 import {
@@ -270,6 +271,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
   const run = runId ? getResearchRun(runId) : createResearchRun(sessionId, prompt);
   if (!run) {
     return res.status(404).json({ error: "run not found" });
+  }
+
+  if (run.status === "interrupted") {
+    resumeResearchRun(run);
   }
 
   subscribeToRun(run, res, Number.isFinite(since) ? since : 0);
